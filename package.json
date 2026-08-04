@@ -7,8 +7,18 @@
     "agy-acp": "./dist/index.js"
   },
   "type": "module",
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maojindao55/agy-acp.git"
+  },
+  "author": "maojindao55 <hobby0524@gmail.com>",
+  "license": "Apache-2.0",
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsc -w"
   },
@@ -17,8 +27,6 @@
     "acp",
     "agent-client-protocol"
   ],
-  "author": "",
-  "license": "Apache-2.0",
   "devDependencies": {
     "typescript": "^5.5.0",
     "@types/node": "^22.0.0"
