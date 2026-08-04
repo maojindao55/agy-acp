@@ -1,13 +1,13 @@
-# agy-acp-custom
+# agy-acp
 
-Custom Agent Client Protocol (ACP) adapter bridge for the Google Antigravity CLI (`agy`) built on native JSON-stream output.
+Agent Client Protocol (ACP) adapter bridge for the Google Antigravity CLI (`agy`) built on native JSON-stream output.
 
 Unlike older adapters that rely on polling and parsing local SQLite database states (`StreamPoller`), this adapter uses `agy`'s native `--output-format stream-json` print mode. It is entirely event-driven, streaming message chunks and tool states in real-time.
 
 ## Features
 
 - **No DB Polling**: Listens to the structured JSON events streamed directly on `agy`'s stdout.
-- **Session History Preservation**: Maps ACP session IDs to `agy`'s `--conversation <id>` context and persists them under `~/.agy-acp-custom-state.json`.
+- **Session History Preservation**: Maps ACP session IDs to `agy`'s `--conversation <id>` context and persists them under `~/.agy-acp-state.json`.
 - **Cancellation**: Gracefully handles `session/cancel` by terminating active sub-processes using `SIGINT`.
 - **Clean Output Channel**: Routes all internal logging and CLI stderr to `stderr` to avoid polluting the JSON-RPC pipe.
 - **Pass-through Configuration**: Forwards command-line flags (like `--dangerously-skip-permissions` or `--sandbox`) to child processes.
@@ -37,7 +37,7 @@ Add the adapter as a custom agent in your Zed `settings.json`:
 ```json
 {
   "agent_servers": {
-    "Google Antigravity Custom": {
+    "Google Antigravity": {
       "command": "node",
       "args": [
         "/Users/hongbin9/www/agy-acp/dist/index.js",

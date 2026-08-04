@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 // to prevent polluting the JSON-RPC stdio channel on stdout.
 console.log = console.error;
 
-const STATE_FILE = path.join(os.homedir(), ".agy-acp-custom-state.json");
+const STATE_FILE = path.join(os.homedir(), ".agy-acp-state.json");
 
 interface SessionState {
   sessionId: string;
@@ -127,13 +127,13 @@ function handleAgyEvent(
   }
 }
 
-const app = agent({ name: "agy-acp-custom" })
+const app = agent({ name: "agy-acp" })
   .onRequest("initialize", (ctx) => {
     return {
       protocolVersion: ctx.params.protocolVersion,
       capabilities: {},
       agent: {
-        name: "Google Antigravity Custom JSON-Stream Bridge",
+        name: "Google Antigravity JSON-Stream Bridge",
         version: "0.1.0"
       }
     };
