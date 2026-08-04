@@ -1,5 +1,5 @@
 {
-  "name": "agy-acp",
+  "name": "@maojindao55/agy-acp",
   "version": "0.1.0",
   "description": "Custom Agent Client Protocol adapter for Google Antigravity CLI using native JSON output",
   "main": "dist/index.js",
