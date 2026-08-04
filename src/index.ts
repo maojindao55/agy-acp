@@ -9,7 +9,7 @@ import * as os from "node:os";
 import crypto from "node:crypto";
 
 if (process.argv.includes("--version") || process.argv.includes("-v") || process.argv.includes("version")) {
-  process.stdout.write("0.1.0\n");
+  process.stdout.write("0.1.1\n");
   process.exit(0);
 }
 
