@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { agent, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { AgentContext } from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
@@ -6,6 +7,11 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
+
+if (process.argv.includes("--version") || process.argv.includes("-v") || process.argv.includes("version")) {
+  process.stdout.write("0.1.0\n");
+  process.exit(0);
+}
 
 // Redirect all standard console.log output to console.error (stderr)
 // to prevent polluting the JSON-RPC stdio channel on stdout.
@@ -17,7 +23,22 @@ interface SessionState {
   sessionId: string;
   cwd: string;
   conversationId?: string; // Resumes the exact agy CLI history
+  modelId?: string;
 }
+
+const DEFAULT_MODELS = [
+  { modelId: "Gemini 3.6 Flash (High)", name: "Gemini 3.6 Flash (High)" },
+  { modelId: "Gemini 3.6 Flash (Medium)", name: "Gemini 3.6 Flash (Medium)" },
+  { modelId: "Gemini 3.6 Flash (Low)", name: "Gemini 3.6 Flash (Low)" },
+  { modelId: "Gemini 3.5 Flash (High)", name: "Gemini 3.5 Flash (High)" },
+  { modelId: "Gemini 3.5 Flash (Medium)", name: "Gemini 3.5 Flash (Medium)" },
+  { modelId: "Gemini 3.5 Flash (Low)", name: "Gemini 3.5 Flash (Low)" },
+  { modelId: "Gemini 3.1 Pro (High)", name: "Gemini 3.1 Pro (High)" },
+  { modelId: "Gemini 3.1 Pro (Low)", name: "Gemini 3.1 Pro (Low)" },
+  { modelId: "Claude Sonnet 4.6 (Thinking)", name: "Claude Sonnet 4.6 (Thinking)" },
+  { modelId: "Claude Opus 4.6 (Thinking)", name: "Claude Opus 4.6 (Thinking)" },
+  { modelId: "GPT-OSS 120B (Medium)", name: "GPT-OSS 120B (Medium)" }
+];
 
 interface StateData {
   sessions: { [sessionId: string]: SessionState };
@@ -131,8 +152,17 @@ const app = agent({ name: "agy-acp" })
   .onRequest("initialize", (ctx) => {
     return {
       protocolVersion: ctx.params.protocolVersion,
-      capabilities: {},
-      agent: {
+      capabilities: {
+        sessionCapabilities: {
+          resume: {}
+        }
+      },
+      agentCapabilities: {
+        sessionCapabilities: {
+          resume: {}
+        }
+      },
+      agentInfo: {
         name: "Google Antigravity JSON-Stream Bridge",
         version: "0.1.0"
       }
@@ -145,7 +175,8 @@ const app = agent({ name: "agy-acp" })
     const state = await readState();
     state.sessions[sessionId] = {
       sessionId,
-      cwd
+      cwd,
+      modelId: "Gemini 3.6 Flash (High)"
     };
     await writeState(state);
 
@@ -157,6 +188,10 @@ const app = agent({ name: "agy-acp" })
           { id: "plan", name: "Plan Mode" }
         ],
         currentModeId: "accept-edits"
+      },
+      models: {
+        availableModels: DEFAULT_MODELS,
+        currentModelId: "Gemini 3.6 Flash (High)"
       }
     };
   })
@@ -190,7 +225,34 @@ const app = agent({ name: "agy-acp" })
           { id: "plan", name: "Plan Mode" }
         ],
         currentModeId: "accept-edits"
+      },
+      models: {
+        availableModels: DEFAULT_MODELS,
+        currentModelId: session.modelId || "Gemini 3.6 Flash (High)"
       }
+    };
+  })
+  .onRequest("session/set_config_option", async (ctx) => {
+    const { sessionId, configId, value } = ctx.params as any;
+    const state = await readState();
+    const session = state.sessions[sessionId];
+    if (session) {
+      if (configId === "model") {
+        session.modelId = value;
+      }
+      await writeState(state);
+    }
+    return {
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          category: "model",
+          type: "select",
+          currentValue: session?.modelId || "Gemini 3.6 Flash (High)",
+          options: DEFAULT_MODELS.map((m) => ({ value: m.modelId, name: m.name }))
+        }
+      ]
     };
   })
   .onRequest("session/close", async (ctx) => {
@@ -220,6 +282,9 @@ const app = agent({ name: "agy-acp" })
     if (session.conversationId) {
       agyArgs.push("--conversation", session.conversationId);
     }
+    if (session.modelId) {
+      agyArgs.push("--model", session.modelId);
+    }
     
     // Check and pass configuration arguments to the sub-process
     const processArgs = process.argv;
@@ -230,7 +295,7 @@ const app = agent({ name: "agy-acp" })
       agyArgs.push("--sandbox");
     }
 
-    console.error(`[agy-acp] Spawning: agy ${agyArgs.map(x => x.includes(' ') ? `"${x}"` : x).join(' ')}`);
+    // console.error(`[agy-acp] Spawning: agy ${agyArgs.map(x => x.includes(' ') ? `"${x}"` : x).join(' ')}`);
 
     return new Promise((resolve, reject) => {
       const child = spawn("agy", agyArgs, {
@@ -308,4 +373,4 @@ const stream = ndJsonStream(
 );
 
 app.connect(stream);
-console.error("[agy-acp] Custom JSON-stream bridge successfully connected over stdio.");
+// Connected over stdio.

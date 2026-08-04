@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Custom Agent Client Protocol adapter for Google Antigravity CLI using native JSON output",
   "main": "dist/index.js",
+  "bin": {
+    "agy-acp": "./dist/index.js"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc",
