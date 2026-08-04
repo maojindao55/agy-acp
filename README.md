@@ -1,8 +1,22 @@
-# agy-acp
+# agy-acp-bridge
 
 Agent Client Protocol (ACP) adapter bridge for the Google Antigravity CLI (`agy`) built on native JSON-stream output.
 
 Unlike older adapters that rely on polling and parsing local SQLite database states (`StreamPoller`), this adapter uses `agy`'s native `--output-format stream-json` print mode. It is entirely event-driven, streaming message chunks and tool states in real-time.
+
+## Installation
+
+Install globally via npm:
+
+```bash
+npm install -g agy-acp-bridge
+```
+
+Or run directly via `npx`:
+
+```bash
+npx agy-acp-bridge
+```
 
 ## Features
 
@@ -12,12 +26,7 @@ Unlike older adapters that rely on polling and parsing local SQLite database sta
 - **Clean Output Channel**: Routes all internal logging and CLI stderr to `stderr` to avoid polluting the JSON-RPC pipe.
 - **Pass-through Configuration**: Forwards command-line flags (like `--dangerously-skip-permissions` or `--sandbox`) to child processes.
 
-## Prerequisites
-
-- **Node.js** (v18+)
-- **Antigravity CLI** (`agy`) installed and authenticated locally.
-
-## Setup
+## Development
 
 1. Install dependencies:
    ```bash
@@ -38,9 +47,24 @@ Add the adapter as a custom agent in your Zed `settings.json`:
 {
   "agent_servers": {
     "Google Antigravity": {
-      "command": "node",
+      "command": "agy-acp",
       "args": [
-        "/Users/hongbin9/www/agy-acp/dist/index.js",
+        "--dangerously-skip-permissions"
+      ]
+    }
+  }
+}
+```
+
+Or using `npx`:
+
+```json
+{
+  "agent_servers": {
+    "Google Antigravity": {
+      "command": "npx",
+      "args": [
+        "agy-acp-bridge",
         "--dangerously-skip-permissions"
       ]
     }
