@@ -17,7 +17,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 
 if (process.argv.includes("--version") || process.argv.includes("-v") || process.argv.includes("version")) {
   process.stdout.write(`${VERSION}\n`);
@@ -426,11 +426,18 @@ function buildAgyArgs(session: SessionState, userPrompt: string): string[] {
     args.push("--add-dir", dir);
   }
 
-  // Pass-through flags from the adapter's own argv.
-  if (process.argv.includes("--dangerously-skip-permissions")) {
+  // agy runs headlessly under --print; without auto-approval every command
+  // tool fails silently ("a tool required the 'command' permission that
+  // headless mode cannot prompt for"). Default to skipping permissions unless
+  // --sandbox is set or the caller opts out via AGY_ACP_NO_SKIP_PERMISSIONS=1.
+  const sandbox = process.argv.includes("--sandbox");
+  const optOut = ["1", "true", "yes"].includes(
+    (process.env.AGY_ACP_NO_SKIP_PERMISSIONS ?? "").toLowerCase(),
+  );
+  if (!sandbox && !optOut) {
     args.push("--dangerously-skip-permissions");
   }
-  if (process.argv.includes("--sandbox")) {
+  if (sandbox) {
     args.push("--sandbox");
   }
 
