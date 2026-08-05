@@ -1,6 +1,6 @@
 {
   "name": "agy-acp-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Custom Agent Client Protocol adapter for Google Antigravity CLI using native JSON output",
   "main": "dist/index.js",
   "bin": {

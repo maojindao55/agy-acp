@@ -17,16 +17,22 @@ import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 if (process.argv.includes("--version") || process.argv.includes("-v") || process.argv.includes("version")) {
   process.stdout.write(`${VERSION}\n`);
   process.exit(0);
 }
 
-// Keep stdout exclusively for the JSON-RPC pipe; everything else goes to stderr.
-console.log = console.error;
-const log = (...args: unknown[]) => console.error("[agy-acp]", ...args);
+// Keep stdout exclusively for the JSON-RPC pipe; debug logs go to stderr only when requested.
+const DEBUG = Boolean(process.env.DEBUG || process.env.AGY_ACP_DEBUG);
+const logDebug = (...args: unknown[]) => {
+  if (DEBUG) console.error("[agy-acp]", ...args);
+};
+const logError = (...args: unknown[]) => {
+  console.error("[agy-acp]", ...args);
+};
+console.log = logDebug;
 
 const STATE_FILE = path.join(os.homedir(), ".agy-acp-state.json");
 
@@ -179,7 +185,7 @@ async function writeState(state: StateData): Promise<void> {
     await fs.mkdir(path.dirname(STATE_FILE), { recursive: true });
     await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
   } catch (err) {
-    log("Failed to write state file:", err);
+    logError("Failed to write state file:", err);
   }
 }
 
@@ -324,7 +330,7 @@ function handleAgyEvent(
     const conversationId = eventData.conversation_id;
     if (conversationId && !session.conversationId) {
       session.conversationId = conversationId;
-      log("Learned conversation ID:", conversationId);
+      logDebug("Learned conversation ID:", conversationId);
     }
     return;
   }
@@ -589,7 +595,7 @@ const app = agent({ name: "agy-acp" })
           try {
             handleAgyEvent(JSON.parse(line), ctx.client, session);
           } catch {
-            log("raw output:", line);
+            logDebug("raw output:", line);
           }
         }
       });
@@ -621,7 +627,7 @@ const app = agent({ name: "agy-acp" })
     const { sessionId } = ctx.params;
     const child = activeProcesses[sessionId];
     if (child) {
-      log("Cancelling active process for session", sessionId);
+      logDebug("Cancelling active process for session", sessionId);
       child.kill("SIGINT");
       setTimeout(() => {
         try {
