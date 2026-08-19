@@ -4,30 +4,43 @@
   "description": "Custom Agent Client Protocol adapter for Google Antigravity CLI using native JSON output",
   "main": "dist/index.js",
   "bin": {
-    "agy-acp": "./dist/index.js"
+    "agy-acp": "./dist/index.js",
+    "agy-acp-bridge": "./dist/index.js"
   },
   "type": "module",
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/maojindao55/agy-acp.git"
   },
-  "author": "maojindao55 <hobby0524@gmail.com>",
-  "license": "Apache-2.0",
-  "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "prepare": "npm run build",
-    "start": "node dist/index.js",
-    "dev": "tsc -w"
-  },
   "keywords": [
     "antigravity",
     "acp",
-    "agent-client-protocol"
+    "agent-client-protocol",
+    "google-antigravity",
+    "ai-agent",
+    "streaming"
   ],
+  "author": "maojindao55 <hobby0524@gmail.com>",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/mcp-test.mjs",
+    "prepare": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsc -w",
+    "release": "node scripts/release.js",
+    "release:patch": "node scripts/release.js patch",
+    "release:minor": "node scripts/release.js minor",
+    "release:major": "node scripts/release.js major"
+  },
   "devDependencies": {
     "typescript": "^5.5.0",
     "@types/node": "^22.0.0"

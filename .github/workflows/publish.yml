@@ -1,58 +1,36 @@
-name: Publish to NPM and GitHub Packages
+name: Publish Release & Sync npmmirror
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
-  publish-npm:
+  create-release:
+    name: Create GitHub Release
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      id-token: write
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build project
-        run: npm run build
-
-      - name: Publish to NPM
-        run: npm publish --access public
+          generate_release_notes: true
+          make_latest: true
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-gpr:
+  sync-npmmirror:
+    name: Sync to Domestic npmmirror
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    needs: [create-release]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://npm.pkg.github.com'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build project
-        run: npm run build
-
-      - name: Publish to GitHub Packages
-        run: npx json -I -f package.json -e 'this.name="@maojindao55/agy-acp-bridge"' && npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trigger npmmirror sync
+        run: |
+          echo "Triggering npmmirror sync for agy-acp-bridge..."
+          curl -s -X PUT https://registry-direct.npmmirror.com/agy-acp-bridge/sync || true
+          echo "npmmirror sync triggered successfully!"
