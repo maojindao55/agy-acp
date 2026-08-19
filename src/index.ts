@@ -3,6 +3,10 @@ import { agent, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk"
 import type {
   AgentContext,
   ContentBlock,
+  McpServer,
+  McpServerHttp,
+  McpServerSse,
+  McpServerStdio,
   SessionConfigOption,
   SessionModeState,
   SessionUpdate,
@@ -17,7 +21,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
 
-const VERSION = "0.2.2";
+const VERSION = "0.3.0";
 
 if (process.argv.includes("--version") || process.argv.includes("-v") || process.argv.includes("version")) {
   process.stdout.write(`${VERSION}\n`);
@@ -55,7 +59,8 @@ interface ModelDef {
   defaultEffort: Effort | null;
 }
 
-const MODELS: ModelDef[] = [
+const FALLBACK_MODELS: ModelDef[] = [
+  { base: "gemini-3.7-flash", name: "Gemini 3.7 Flash", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
   { base: "gemini-3.6-flash", name: "Gemini 3.6 Flash", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
   { base: "gemini-3.5-flash", name: "Gemini 3.5 Flash", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
   { base: "gemini-3.1-pro", name: "Gemini 3.1 Pro", contextWindow: 2_000_000, supportsEffort: true, defaultEffort: "high" },
@@ -64,10 +69,87 @@ const MODELS: ModelDef[] = [
   { base: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", contextWindow: 200_000, supportsEffort: false, defaultEffort: null },
 ];
 
-const DEFAULT_MODEL_BASE = "gemini-3.6-flash";
+let dynamicModels: ModelDef[] = [...FALLBACK_MODELS];
+let modelsFetchPromise: Promise<ModelDef[]> | null = null;
+
+function fetchAgyModels(): Promise<ModelDef[] | null> {
+  return new Promise((resolve) => {
+    const child = spawn("agy", ["models"], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d: Buffer) => {
+      out += d.toString("utf-8");
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => {
+      if (code === 0 && out.trim()) {
+        const lines = out.trim().split("\n");
+        const map = new Map<string, ModelDef>();
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (!line) continue;
+          const [id, name] = line.split("\t").map((s) => s.trim());
+          if (!id) continue;
+          const m = id.match(/^(.+)-(high|medium|low)$/);
+          if (m) {
+            const base = m[1];
+            const effort = m[2] as Effort;
+            const cleanName = (name || base).replace(/\s*\((High|Medium|Low)\)\s*$/i, "").trim();
+            const existing = map.get(base);
+            if (existing) {
+              if (effort === "high") existing.defaultEffort = "high";
+            } else {
+              map.set(base, {
+                base,
+                name: cleanName,
+                contextWindow: base.includes("pro") ? 2_000_000 : (base.includes("gpt") ? 128_000 : 1_000_000),
+                supportsEffort: true,
+                defaultEffort: effort === "high" ? "high" : effort,
+              });
+            }
+          } else {
+            const cleanName = (name || id).replace(/\s*\(Thinking\)\s*$/i, "").trim();
+            if (!map.has(id)) {
+              map.set(id, {
+                base: id,
+                name: cleanName,
+                contextWindow: 200_000,
+                supportsEffort: false,
+                defaultEffort: null,
+              });
+            }
+          }
+        }
+        if (map.size > 0) {
+          resolve(Array.from(map.values()));
+          return;
+        }
+      }
+      resolve(null);
+    });
+  });
+}
+
+async function getAvailableModels(): Promise<ModelDef[]> {
+  if (!modelsFetchPromise) {
+    modelsFetchPromise = fetchAgyModels()
+      .then((models) => {
+        if (models && models.length > 0) {
+          dynamicModels = models;
+        }
+        return dynamicModels;
+      })
+      .catch(() => dynamicModels);
+  }
+  return modelsFetchPromise;
+}
+
+// Start discovery immediately in background
+void getAvailableModels();
+
+const DEFAULT_MODEL_BASE = "gemini-3.7-flash";
 
 function findModel(base: string): ModelDef | undefined {
-  return MODELS.find((m) => m.base === base);
+  return dynamicModels.find((m) => m.base === base);
 }
 
 function contextWindowFor(base: string): number {
@@ -81,6 +163,9 @@ function contextWindowFor(base: string): number {
 // state and accept old model ids from clients that may have persisted them.
 
 const LEGACY_MODEL_MAP: Record<string, { base: string; effort: Effort | null }> = {
+  "Gemini 3.7 Flash (High)": { base: "gemini-3.7-flash", effort: "high" },
+  "Gemini 3.7 Flash (Medium)": { base: "gemini-3.7-flash", effort: "medium" },
+  "Gemini 3.7 Flash (Low)": { base: "gemini-3.7-flash", effort: "low" },
   "Gemini 3.6 Flash (High)": { base: "gemini-3.6-flash", effort: "high" },
   "Gemini 3.6 Flash (Medium)": { base: "gemini-3.6-flash", effort: "medium" },
   "Gemini 3.6 Flash (Low)": { base: "gemini-3.6-flash", effort: "low" },
@@ -134,6 +219,7 @@ interface SessionState {
   effort: Effort | null;
   modeId: ModeId;
   additionalDirectories: string[];
+  mcpServers?: McpServer[];
 }
 
 interface StateData {
@@ -151,6 +237,7 @@ function migrateSession(raw: any): SessionState {
       effort: raw.effort ?? null,
       modeId: (raw.modeId as ModeId) ?? DEFAULT_MODE_ID,
       additionalDirectories: raw.additionalDirectories ?? [],
+      mcpServers: raw.mcpServers ?? [],
     };
   }
   // Legacy schema: modelId held a display name or an effort-baked canonical id.
@@ -163,7 +250,125 @@ function migrateSession(raw: any): SessionState {
     effort: resolved?.effort ?? null,
     modeId: DEFAULT_MODE_ID,
     additionalDirectories: [],
+    mcpServers: raw.mcpServers ?? [],
   };
+}
+
+// --- MCP Server synchronization --------------------------------------------
+
+interface AgyMcpServerStdio {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+interface AgyMcpServerSse {
+  serverUrl: string;
+  headers?: Record<string, string>;
+}
+
+type AgyMcpServer = AgyMcpServerStdio | AgyMcpServerSse;
+
+interface AgyMcpConfig {
+  mcpServers: Record<string, AgyMcpServer>;
+}
+
+function convertToAgyMcpConfig(mcpServers: McpServer[]): Record<string, AgyMcpServer> {
+  const result: Record<string, AgyMcpServer> = {};
+  for (const s of mcpServers) {
+    if (!s || typeof s !== "object") continue;
+    const name = s.name;
+    if (!name) continue;
+
+    if ("type" in s && (s.type === "sse" || s.type === "http")) {
+      const sseServer = s as McpServerSse | McpServerHttp;
+      let headers: Record<string, string> | undefined = undefined;
+      if (Array.isArray(sseServer.headers)) {
+        headers = {};
+        for (const h of sseServer.headers) {
+          if (h && typeof h === "object" && h.name && h.value !== undefined) {
+            headers[h.name] = String(h.value);
+          }
+        }
+      } else if (sseServer.headers && typeof sseServer.headers === "object") {
+        headers = sseServer.headers as Record<string, string>;
+      }
+
+      result[name] = {
+        serverUrl: sseServer.url,
+        ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+      };
+    } else {
+      // Stdio server (type === "stdio" or McpServerStdio)
+      const stdioServer = s as McpServerStdio;
+      let env: Record<string, string> | undefined = undefined;
+      if (Array.isArray(stdioServer.env)) {
+        env = {};
+        for (const e of stdioServer.env) {
+          if (e && typeof e === "object" && e.name && e.value !== undefined) {
+            env[e.name] = String(e.value);
+          }
+        }
+      } else if (stdioServer.env && typeof stdioServer.env === "object") {
+        env = stdioServer.env as Record<string, string>;
+      }
+
+      result[name] = {
+        command: stdioServer.command,
+        args: Array.isArray(stdioServer.args) ? stdioServer.args : [],
+        ...(env && Object.keys(env).length > 0 ? { env } : {}),
+      };
+    }
+  }
+  return result;
+}
+
+function sanitizeCwd(cwd: string | undefined): string {
+  if (!cwd || cwd === "/" || cwd === ".") {
+    return os.homedir();
+  }
+  return cwd;
+}
+
+async function syncSessionMcpConfig(session: SessionState): Promise<void> {
+  if (!session.mcpServers || session.mcpServers.length === 0) return;
+  const convertedServers = convertToAgyMcpConfig(session.mcpServers);
+  if (Object.keys(convertedServers).length === 0) return;
+
+  const targetDirs = [
+    path.join(sanitizeCwd(session.cwd), ".agents"),
+    path.join(os.homedir(), ".gemini", "config"),
+  ];
+
+  for (const dir of targetDirs) {
+    try {
+      const configFile = path.join(dir, "mcp_config.json");
+      let existingConfig: AgyMcpConfig = { mcpServers: {} };
+      try {
+        const content = await fs.readFile(configFile, "utf-8");
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === "object" && parsed.mcpServers) {
+          existingConfig = parsed;
+        }
+      } catch {
+        // No existing config file or invalid JSON, start fresh
+      }
+
+      const mergedConfig: AgyMcpConfig = {
+        ...existingConfig,
+        mcpServers: {
+          ...(existingConfig.mcpServers || {}),
+          ...convertedServers,
+        },
+      };
+
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(configFile, JSON.stringify(mergedConfig, null, 2), "utf-8");
+      logDebug("Synchronized MCP servers into", configFile);
+    } catch (err) {
+      logError(`Failed to synchronize MCP config into ${dir}:`, err);
+    }
+  }
 }
 
 async function readState(): Promise<StateData> {
@@ -206,7 +411,7 @@ function buildConfigOptions(session: SessionState): SessionConfigOption[] {
       category: "model",
       type: "select",
       currentValue: session.modelBase,
-      options: MODELS.map((m) => ({ value: m.base, name: m.name })),
+      options: dynamicModels.map((m) => ({ value: m.base, name: m.name })),
     },
   ];
 
@@ -285,6 +490,9 @@ function mapToolKind(toolName: string): ToolKind {
     t === "browser_subagent"
   ) {
     return "think";
+  }
+  if (t === "call_mcp_tool" || t.startsWith("mcp__") || t.startsWith("mcp_")) {
+    return "other";
   }
   return "other";
 }
@@ -375,10 +583,18 @@ function handleAgyEvent(
 
     if (state === "ACTIVE") {
       const location = extractLocation(parameters);
+      let title = tool_name ? tool_name : "Running tool";
+      if (tool_name === "call_mcp_tool") {
+        const mcpServer = parameters?.server_name || parameters?.server || parameters?.name;
+        const mcpTool = parameters?.tool_name || parameters?.tool;
+        if (mcpTool) {
+          title = mcpServer ? `MCP [${mcpServer}]: ${mcpTool}` : `MCP: ${mcpTool}`;
+        }
+      }
       emit(client, session.sessionId, {
         sessionUpdate: "tool_call",
         toolCallId,
-        title: tool_name ? tool_name : "Running tool",
+        title,
         name: tool_name ?? undefined,
         kind: mapToolKind(tool_name),
         status: "in_progress",
@@ -456,10 +672,15 @@ const app = agent({ name: "agy-acp" })
         version: VERSION,
       },
       agentCapabilities: {
+        loadSession: true,
         // embeddedContext is honored by serializing resource blocks into the
         // text prompt (agy --print is text-only).
         promptCapabilities: {
           embeddedContext: true,
+        },
+        mcpCapabilities: {
+          http: true,
+          sse: true,
         },
         sessionCapabilities: {
           resume: {},
@@ -472,20 +693,24 @@ const app = agent({ name: "agy-acp" })
     };
   })
   .onRequest("session/new", async (ctx) => {
-    const { cwd, additionalDirectories } = ctx.params;
+    const { cwd, additionalDirectories, mcpServers } = ctx.params;
     const sessionId = crypto.randomUUID();
+
+    await getAvailableModels();
 
     const state = await readState();
     const session: SessionState = {
       sessionId,
-      cwd,
-      modelBase: DEFAULT_MODEL_BASE,
+      cwd: sanitizeCwd(cwd),
+      modelBase: dynamicModels[0]?.base ?? DEFAULT_MODEL_BASE,
       effort: null,
       modeId: DEFAULT_MODE_ID,
       additionalDirectories: additionalDirectories ?? [],
+      mcpServers: mcpServers ?? [],
     };
     state.sessions[sessionId] = session;
     await writeState(state);
+    await syncSessionMcpConfig(session);
 
     return {
       sessionId,
@@ -508,17 +733,52 @@ const app = agent({ name: "agy-acp" })
     delete state.sessions[sessionId];
     await writeState(state);
   })
-  .onRequest("session/resume", async (ctx) => {
-    const { sessionId, additionalDirectories } = ctx.params;
+  .onRequest("session/load", async (ctx) => {
+    const { sessionId, cwd, additionalDirectories, mcpServers } = ctx.params;
+    await getAvailableModels();
     const state = await readState();
     const session = state.sessions[sessionId];
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
     }
+    if (cwd) {
+      session.cwd = sanitizeCwd(cwd);
+    }
     if (additionalDirectories) {
       session.additionalDirectories = additionalDirectories;
-      await writeState(state);
     }
+    if (mcpServers !== undefined) {
+      session.mcpServers = mcpServers;
+    }
+    await writeState(state);
+    await syncSessionMcpConfig(session);
+
+    return {
+      sessionId,
+      modes: modeState(session.modeId),
+      configOptions: buildConfigOptions(session),
+    };
+  })
+  .onRequest("session/resume", async (ctx) => {
+    const { sessionId, cwd, additionalDirectories, mcpServers } = ctx.params;
+    await getAvailableModels();
+    const state = await readState();
+    const session = state.sessions[sessionId];
+    if (!session) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+    if (cwd) {
+      session.cwd = sanitizeCwd(cwd);
+    }
+    if (additionalDirectories) {
+      session.additionalDirectories = additionalDirectories;
+    }
+    if (mcpServers !== undefined) {
+      session.mcpServers = mcpServers;
+    }
+    await writeState(state);
+    await syncSessionMcpConfig(session);
+
     return {
       sessionId,
       modes: modeState(session.modeId),
@@ -543,6 +803,7 @@ const app = agent({ name: "agy-acp" })
   })
   .onRequest("session/set_config_option", async (ctx) => {
     const { sessionId, configId } = ctx.params;
+    await getAvailableModels();
     const state = await readState();
     const session = state.sessions[sessionId];
     if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -580,6 +841,8 @@ const app = agent({ name: "agy-acp" })
       throw new Error(`Session ${sessionId} not found`);
     }
 
+    await syncSessionMcpConfig(session);
+
     const userPrompt = serializePrompt(prompt);
     const agyArgs = buildAgyArgs(session, userPrompt);
 
@@ -591,13 +854,20 @@ const app = agent({ name: "agy-acp" })
       activeProcesses[sessionId] = child;
 
       const turn: PromptTurnResult = { stopReason: "end_turn" };
-      let buffer = "";
+      // Accumulate raw bytes and split on newline boundaries. Splitting on the
+      // data chunk boundary (chunk.toString("utf-8")) corrupts multi-byte
+      // UTF-8 characters (e.g. Chinese): a chunk can end mid-character, and
+      // toString replaces the dangling bytes with U+FFFD irreversibly. "\n"
+      // (0x0a) is a single-byte ASCII value that can never fall inside a
+      // multi-byte sequence, so it is always safe to split on.
+      let buffer = Buffer.alloc(0);
 
       child.stdout.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString("utf-8");
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
+        buffer = Buffer.concat([buffer, chunk]);
+        let newlineIdx: number;
+        while ((newlineIdx = buffer.indexOf(0x0a)) >= 0) {
+          const line = buffer.subarray(0, newlineIdx).toString("utf-8");
+          buffer = buffer.subarray(newlineIdx + 1);
           if (!line.trim()) continue;
           try {
             handleAgyEvent(JSON.parse(line), ctx.client, session);

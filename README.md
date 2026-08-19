@@ -21,7 +21,9 @@ npx agy-acp-bridge
 ## Features
 
 - **No DB Polling**: Listens to the structured JSON events streamed directly on `agy`'s stdout.
-- **Session History Preservation**: Maps ACP session IDs to `agy`'s `--conversation <id>` context and persists them under `~/.agy-acp-state.json`.
+- **MCP Server Support**: Full Agent Client Protocol MCP integration (`stdio`, `sse`, `http`), dynamically synced into `<cwd>/.agents/mcp_config.json`.
+- **Session History Preservation**: Maps ACP session IDs to `agy`'s `--conversation <id>` context and persists them under `~/.agy-acp-state.json`. Supports `session/new`, `session/load`, `session/resume`, `session/list`, and `session/delete`.
+- **Robust UTF-8 Streaming**: Accurately buffers streaming chunks across multi-byte character boundaries without corrupting non-ASCII (e.g., Chinese) outputs.
 - **Cancellation**: Gracefully handles `session/cancel` by terminating active sub-processes using `SIGINT`.
 - **Clean Output Channel**: Routes all internal logging and CLI stderr to `stderr` to avoid polluting the JSON-RPC pipe.
 - **Pass-through Configuration**: Forwards command-line flags (like `--dangerously-skip-permissions` or `--sandbox`) to child processes.
