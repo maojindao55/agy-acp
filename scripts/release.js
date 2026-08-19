@@ -5,7 +5,7 @@
  */
 
 import { execSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
@@ -183,19 +183,36 @@ async function main() {
   console.log('\n\x1b[1m[1/5] 执行 TypeScript 构建...\x1b[0m')
   run('npm run build')
 
-  // 3. 更新 package.json
+  // 3. 更新 package.json (及 package-lock.json)
   console.log('\n\x1b[1m[2/5] 更新 package.json 版本号...\x1b[0m')
   pkg.version = newVersion
   writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n')
 
+  const lockPath = resolve(rootDir, 'package-lock.json')
+  if (existsSync(lockPath)) {
+    try {
+      const lockPkg = JSON.parse(readFileSync(lockPath, 'utf-8'))
+      lockPkg.version = newVersion
+      if (lockPkg.packages && lockPkg.packages['']) {
+        lockPkg.packages[''].version = newVersion
+      }
+      writeFileSync(lockPath, JSON.stringify(lockPkg, null, 2) + '\n')
+    } catch {}
+  }
+
   // 4. Git Commit & Tag
   console.log('\n\x1b[1m[3/5] 提交 Git 变更并打 Tag...\x1b[0m')
   try {
-    run('git add package.json dist/')
+    const filesToAdd = ['package.json']
+    if (existsSync(lockPath)) {
+      filesToAdd.push('package-lock.json')
+    }
+    run(`git add ${filesToAdd.join(' ')}`)
     run(`git commit -m "chore(release): v${newVersion}"`)
     run(`git tag -a v${newVersion} -m "Release v${newVersion}"`)
   } catch (err) {
     console.error('\x1b[31mGit 提交或 Tag 失败:\x1b[0m', err?.message || String(err))
+    throw err
   }
 
   // 5. 推送 Git (可选)
