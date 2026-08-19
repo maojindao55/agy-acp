@@ -1,0 +1,258 @@
+#!/usr/bin/env node
+/**
+ * One-click Release Script for agy-acp-bridge.
+ * Automates typechecking, testing, building, version bumping, git tagging, pushing, npm publishing, and npmmirror syncing.
+ */
+
+import { execSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createInterface } from 'node:readline'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const rootDir = resolve(__dirname, '..')
+const pkgPath = resolve(rootDir, 'package.json')
+
+function run(cmd, options = {}) {
+  console.log(`\x1b[36m➜ ${cmd}\x1b[0m`)
+  execSync(cmd, { cwd: rootDir, stdio: 'inherit', ...options })
+}
+
+function prompt(question) {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  })
+  return new Promise((res) => {
+    rl.question(question, (answer) => {
+      rl.close()
+      res(answer.trim())
+    })
+  })
+}
+
+function parseSemver(version) {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/)
+  if (!match) throw new Error(`Invalid semver version: ${version}`)
+  return {
+    major: parseInt(match[1], 10),
+    minor: parseInt(match[2], 10),
+    patch: parseInt(match[3], 10),
+    prerelease: match[4],
+  }
+}
+
+function getNextVersion(current, type) {
+  const { major, minor, patch } = parseSemver(current)
+  switch (type) {
+    case 'patch':
+      return `${major}.${minor}.${patch + 1}`
+    case 'minor':
+      return `${major}.${minor + 1}.0`
+    case 'major':
+      return `${major + 1}.0.0`
+    default:
+      if (/^\d+\.\d+\.\d+/.test(type)) return type
+      throw new Error(`Unknown release type: ${type}`)
+  }
+}
+
+function checkNpmAuth() {
+  try {
+    const user = execSync('npm whoami --registry https://registry.npmjs.org/', {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    }).trim()
+    return user
+  } catch {
+    return null
+  }
+}
+
+function checkGitStatus() {
+  try {
+    const status = execSync('git status --porcelain', {
+      cwd: rootDir,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    }).trim()
+    return status
+  } catch {
+    return null
+  }
+}
+
+function getCurrentBranch() {
+  try {
+    return execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: rootDir,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    }).trim()
+  } catch {
+    return 'unknown'
+  }
+}
+
+async function main() {
+  console.log('\n\x1b[1m\x1b[35m🚀 agy-acp-bridge 一键发布助手\x1b[0m\n')
+
+  // 0.1 检查 Git 工作区是否干净（防止 git 与 npm 版本不一致）
+  const gitStatus = checkGitStatus()
+  if (gitStatus) {
+    console.error('\x1b[31m✖ 发布前检查失败: Git 工作区存在未提交的修改！\x1b[0m')
+    console.error('未提交的文件列表:\n')
+    console.error(
+      gitStatus
+        .split('\n')
+        .map((l) => `  \x1b[33m${l}\x1b[0m`)
+        .join('\n')
+    )
+    console.error(
+      '\n为了保证 Git 提交记录与 npm 发布产物严格一致，请先提交 (git commit) 或清理 (git stash) 后再发布！\n'
+    )
+    process.exit(1)
+  }
+
+  // 0.2 检查 Git 当前分支
+  const currentBranch = getCurrentBranch()
+  if (currentBranch !== 'main' && currentBranch !== 'master') {
+    const branchConfirm = await prompt(
+      `当前处于分支 [\x1b[33m${currentBranch}\x1b[0m]，非主分支，是否确认继续发布？(y/N): `
+    )
+    if (branchConfirm.toLowerCase() !== 'y') {
+      console.log('\x1b[31m发布已取消。\x1b[0m')
+      process.exit(0)
+    }
+  }
+
+  // 0.3 前置校验 npm 登录状态
+  const npmUser = checkNpmAuth()
+  if (!npmUser) {
+    console.error('\x1b[31m✖ 发布前检查失败: 您尚未登录 npm 官方源！\x1b[0m')
+    console.error('为了避免发布中断并产生脏 Git 提交/Tag，请先在终端执行登录：\n')
+    console.error('  \x1b[36m➜ npm login --registry https://registry.npmjs.org/\x1b[0m\n')
+    process.exit(1)
+  }
+  console.log(`npm 鉴权账号: \x1b[36m${npmUser}\x1b[0m`)
+
+  // 0.4 前置执行类型检查与自动化测试
+  console.log('\n\x1b[1m➜ 执行类型检查 (npm run typecheck)...\x1b[0m')
+  run('npm run typecheck')
+  console.log('\x1b[32m✔ 类型检查通过！\x1b[0m')
+
+  console.log('\n\x1b[1m➜ 执行自动化测试套件 (npm test)...\x1b[0m')
+  run('npm test')
+  console.log('\x1b[32m✔ 自动化测试全部通过！\x1b[0m\n')
+
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'))
+  const currentVersion = pkg.version
+  const packageName = pkg.name || 'agy-acp-bridge'
+  console.log(`当前项目: \x1b[36m${packageName}\x1b[0m, 版本: \x1b[32mv${currentVersion}\x1b[0m\n`)
+
+  // 1. 确定新版本号
+  let releaseType = process.argv[2]
+  if (!releaseType) {
+    console.log('请选择发布版本类型:')
+    console.log(`  1) patch (\x1b[33mv${getNextVersion(currentVersion, 'patch')}\x1b[0m - 缺陷修复/微调)`)
+    console.log(`  2) minor (\x1b[33mv${getNextVersion(currentVersion, 'minor')}\x1b[0m - 新功能发布)`)
+    console.log(`  3) major (\x1b[33mv${getNextVersion(currentVersion, 'major')}\x1b[0m - 重大重构/破坏性变更)`)
+    console.log('  4) custom (手动输入自定义版本号)')
+
+    const choice = await prompt('\n请输入序号 (1/2/3/4) [默认: 1]: ')
+    if (choice === '2' || choice === 'minor') releaseType = 'minor'
+    else if (choice === '3' || choice === 'major') releaseType = 'major'
+    else if (choice === '4' || choice === 'custom') {
+      releaseType = await prompt('请输入新版本号 (例如 0.4.0): ')
+    } else {
+      releaseType = 'patch'
+    }
+  }
+
+  const newVersion = getNextVersion(currentVersion, releaseType)
+  console.log(`\n准备发布版本: \x1b[1m\x1b[32mv${newVersion}\x1b[0m\n`)
+
+  const confirm = await prompt(`确认发布 v${newVersion} 吗？(y/N): `)
+  if (confirm.toLowerCase() !== 'y') {
+    console.log('\x1b[31m发布已取消。\x1b[0m')
+    process.exit(0)
+  }
+
+  // 2. 编译构建
+  console.log('\n\x1b[1m[1/5] 执行 TypeScript 构建...\x1b[0m')
+  run('npm run build')
+
+  // 3. 更新 package.json
+  console.log('\n\x1b[1m[2/5] 更新 package.json 版本号...\x1b[0m')
+  pkg.version = newVersion
+  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n')
+
+  // 4. Git Commit & Tag
+  console.log('\n\x1b[1m[3/5] 提交 Git 变更并打 Tag...\x1b[0m')
+  try {
+    run('git add package.json dist/')
+    run(`git commit -m "chore(release): v${newVersion}"`)
+    run(`git tag -a v${newVersion} -m "Release v${newVersion}"`)
+  } catch (err) {
+    console.error('\x1b[31mGit 提交或 Tag 失败:\x1b[0m', err?.message || String(err))
+  }
+
+  // 5. 推送 Git (可选)
+  const pushGit = await prompt('\n是否推送到 Git 远程仓库及 Tags？(Y/n): ')
+  if (pushGit.toLowerCase() !== 'n') {
+    try {
+      run('git push')
+      run('git push --tags')
+    } catch (err) {
+      console.warn('\x1b[33mGit push 失败（可能未配置 remote），已跳过:\x1b[0m', err?.message || String(err))
+    }
+  }
+
+  // 6. 发布到 npm
+  console.log(`\n\x1b[1m[4/5] 发布到 npm 官方仓库 (${packageName}@${newVersion})...\x1b[0m`)
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  let published = false
+  let lastError = null
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      run('npm publish --access public --registry https://registry.npmjs.org/')
+      published = true
+      console.log(`\x1b[32m✔ ${packageName}@${newVersion} 发布成功！\x1b[0m`)
+      break
+    } catch (err) {
+      lastError = err
+      if (attempt === 1) {
+        console.warn(`\x1b[33m首次发布遇到抖动，等待 3 秒后重试...\x1b[0m`)
+        await sleep(3000)
+      }
+    }
+  }
+
+  if (!published) {
+    console.error(`\x1b[31m✖ ${packageName}@${newVersion} 发布失败: ${lastError?.message || lastError}\x1b[0m`)
+  }
+
+  // 7. 自动触发国内 npmmirror 同步
+  console.log('\n\x1b[1m[5/5] 触发国内 npmmirror (淘宝源) 自动同步...\x1b[0m')
+  try {
+    run(`curl -s -X PUT https://registry-direct.npmmirror.com/${packageName}/sync`)
+    console.log(`\x1b[32m✔ 国内 npmmirror 镜像 [${packageName}] 同步请求已发送！\x1b[0m`)
+  } catch {
+    console.warn(`\x1b[33m触发 [${packageName}] npmmirror 镜像同步失败，通常会在数分钟内自动同步。\x1b[0m`)
+  }
+
+  // 8. 成功提示
+  console.log('\n\x1b[1m\x1b[32m🎉 发布流程结束！\x1b[0m\n')
+  console.log('发布结果摘要:')
+  console.log(`  - \x1b[1m${packageName}\x1b[0m: ${published ? '\x1b[32m发布成功 ✔\x1b[0m' : '\x1b[31m发布失败 ✖\x1b[0m'}`)
+  console.log('\n国内/国际安装测试:')
+  console.log(`  npx ${packageName}@${newVersion}`)
+  console.log(`  npm install -g ${packageName}@${newVersion}\n`)
+}
+
+main().catch((err) => {
+  console.error('\n\x1b[31m发布失败:\x1b[0m', err.message)
+  process.exit(1)
+})
