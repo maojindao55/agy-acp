@@ -16,12 +16,15 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
 
-const VERSION = "0.3.0";
+const { version: VERSION } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
+) as { version: string };
 
 if (process.argv.includes("--version") || process.argv.includes("-v") || process.argv.includes("version")) {
   process.stdout.write(`${VERSION}\n`);

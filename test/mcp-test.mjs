@@ -1,11 +1,21 @@
 // Test MCP Server injection via ACP protocol
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import assert from "node:assert/strict";
+import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { client, ndJsonStream } from "@agentclientprotocol/sdk";
+
+const execFileAsync = promisify(execFile);
+const packageJson = JSON.parse(await fs.readFile("package.json", "utf-8"));
+const { stdout: versionOutput } = await execFileAsync(
+  process.execPath,
+  ["dist/index.js", "--version"],
+  { cwd: process.cwd() },
+);
+assert.equal(versionOutput.trim(), packageJson.version);
 
 const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-mcp-test-"));
 const testDir = path.join(testRoot, "workspace-initial");
