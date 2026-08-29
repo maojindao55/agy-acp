@@ -1,12 +1,21 @@
 // Test MCP Server injection via ACP protocol
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
+import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { client, ndJsonStream } from "@agentclientprotocol/sdk";
 
-const testDir = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-mcp-test-"));
+const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-mcp-test-"));
+const testDir = path.join(testRoot, "workspace-initial");
+const resumedDir = path.join(testRoot, "workspace-resumed");
+const testHome = path.join(testRoot, "home");
+await Promise.all([
+  fs.mkdir(testDir, { recursive: true }),
+  fs.mkdir(resumedDir, { recursive: true }),
+  fs.mkdir(testHome, { recursive: true }),
+]);
 
 try {
   console.log("Using test workspace:", testDir);
@@ -14,7 +23,10 @@ try {
   const child = spawn(
     "node",
     ["dist/index.js"],
-    { cwd: process.cwd(), env: { ...process.env, DEBUG: "1" } },
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: testHome, DEBUG: "1" },
+    },
   );
 
   child.stderr.on("data", (c) => process.stderr.write(`\x1b[2m[adapter] ${c}\x1b[0m`));
@@ -79,12 +91,29 @@ try {
       throw new Error("Unexpected serverUrl in sse config");
     }
 
-    console.log(" All MCP injection assertions passed successfully!");
+    // 4. Resuming in a different workspace must update both the live session
+    // listing and the state used by subsequent bridge processes.
+    await ctx.request("session/resume", {
+      sessionId: session.sessionId,
+      cwd: resumedDir,
+    });
+
+    const listedSessions = await ctx.request("session/list", {});
+    const resumedSession = listedSessions.sessions.find(
+      (candidate) => candidate.sessionId === session.sessionId,
+    );
+    assert.equal(resumedSession?.cwd, resumedDir);
+
+    const stateFile = path.join(testHome, ".agy-acp-state.json");
+    const persistedState = JSON.parse(await fs.readFile(stateFile, "utf-8"));
+    assert.equal(persistedState.sessions[session.sessionId]?.cwd, resumedDir);
+
+    console.log(" All MCP injection and session resume assertions passed successfully!");
     session.dispose();
   });
 
   child.stdin.end();
   child.kill();
 } finally {
-  await fs.rm(testDir, { recursive: true, force: true });
+  await fs.rm(testRoot, { recursive: true, force: true });
 }
