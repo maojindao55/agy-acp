@@ -21,6 +21,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
+import { resolveAgyExecutable } from "./agyExecutable.js";
 
 const { version: VERSION } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
@@ -42,6 +43,7 @@ const logError = (...args: unknown[]) => {
 console.log = logDebug;
 
 const STATE_FILE = path.join(os.homedir(), ".agy-acp-state.json");
+const AGY_EXECUTABLE = resolveAgyExecutable();
 
 // --- Models ----------------------------------------------------------------
 // agy exposes models via `agy models`. Some embed reasoning effort in the id
@@ -77,7 +79,7 @@ let modelsFetchPromise: Promise<ModelDef[]> | null = null;
 
 function fetchAgyModels(): Promise<ModelDef[] | null> {
   return new Promise((resolve) => {
-    const child = spawn("agy", ["models"], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(AGY_EXECUTABLE, ["models"], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (d: Buffer) => {
       out += d.toString("utf-8");
@@ -850,7 +852,7 @@ const app = agent({ name: "agy-acp" })
     const agyArgs = buildAgyArgs(session, userPrompt);
 
     return new Promise((resolve, reject) => {
-      const child = spawn("agy", agyArgs, {
+      const child = spawn(AGY_EXECUTABLE, agyArgs, {
         cwd: session.cwd,
         env: { ...process.env },
       });

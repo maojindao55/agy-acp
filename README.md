@@ -12,6 +12,30 @@ Install globally via npm:
 npm install -g agy-acp-bridge
 ```
 
+If the official Antigravity CLI (`agy`) is not already installed, the npm
+package downloads and runs Google's installer for the current platform. The
+official installer selects the latest release and verifies its SHA-512 checksum
+before installing it. Existing `agy` installations are left in place because
+the CLI keeps itself up to date.
+
+The bridge does not redistribute Google's platform binaries inside the npm
+tarball. To install only the ACP bridge (for example in an offline build or when
+provisioning `agy` separately), disable the automatic installer:
+
+```bash
+AGY_ACP_SKIP_CLI_INSTALL=1 npm install -g agy-acp-bridge
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:AGY_ACP_SKIP_CLI_INSTALL = "1"
+npm install -g agy-acp-bridge
+```
+
+If `agy` is installed in a non-standard location, point the bridge at it with
+`AGY_ACP_COMMAND=/absolute/path/to/agy`.
+
 Or run directly via `npx`:
 
 ```bash
