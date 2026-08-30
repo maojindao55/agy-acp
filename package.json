@@ -10,7 +10,8 @@
   "type": "module",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "scripts/install-antigravity.mjs"
   ],
   "repository": {
     "type": "git",
@@ -29,10 +30,15 @@
   "publishConfig": {
     "access": "public"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node test/mcp-test.mjs",
+    "pretest": "npm run build",
+    "test": "node --test test/install-antigravity.test.mjs test/agy-executable.test.mjs && node test/mcp-test.mjs",
+    "postinstall": "node scripts/install-antigravity.mjs",
     "prepare": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsc -w",
