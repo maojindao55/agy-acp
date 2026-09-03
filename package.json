@@ -37,7 +37,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
-    "test": "node --test test/install-antigravity.test.mjs test/agy-executable.test.mjs && node test/mcp-test.mjs",
+    "test": "node --test test/install-antigravity.test.mjs test/agy-executable.test.mjs test/agy-args.test.mjs test/prompt-error.test.mjs && node test/mcp-test.mjs",
     "postinstall": "node scripts/install-antigravity.mjs",
     "prepare": "npm run build",
     "start": "node dist/index.js",

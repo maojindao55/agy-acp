@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { agent, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
+import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError } from "@agentclientprotocol/sdk";
 import type {
   AgentContext,
   ContentBlock,
@@ -22,6 +22,16 @@ import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
 import { resolveAgyExecutable } from "./agyExecutable.js";
+import {
+  EFFORTS,
+  type Effort,
+  MODE_ACCEPT_EDITS,
+  MODE_PLAN,
+  MODE_IDS,
+  type ModeId,
+  DEFAULT_MODE_ID,
+  buildAgyArgs,
+} from "./agyArgs.js";
 
 const { version: VERSION } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
@@ -53,8 +63,6 @@ const AGY_EXECUTABLE = resolveAgyExecutable();
 //   - claude-*: no effort; `--model <base>` only.
 //   - a full effort-baked id CONFLICTS with `--effort`, so we always split.
 
-const EFFORTS = ["low", "medium", "high"] as const;
-type Effort = (typeof EFFORTS)[number];
 
 interface ModelDef {
   base: string;
@@ -198,11 +206,6 @@ function resolveModel(value: string): { base: string; effort: Effort | null } | 
 
 // --- Modes -----------------------------------------------------------------
 
-const MODE_ACCEPT_EDITS = "accept-edits";
-const MODE_PLAN = "plan";
-const MODE_IDS = [MODE_ACCEPT_EDITS, MODE_PLAN] as const;
-type ModeId = (typeof MODE_IDS)[number];
-const DEFAULT_MODE_ID: ModeId = MODE_ACCEPT_EDITS;
 
 function modeState(currentModeId: ModeId): SessionModeState {
   return {
@@ -404,7 +407,7 @@ const activeProcesses: Record<string, ReturnType<typeof spawn>> = {};
 
 // --- Config options --------------------------------------------------------
 
-function effectiveEffort(session: SessionState): Effort | null {
+function effectiveEffort(session: { modelBase: string; effort: Effort | null }): Effort | null {
   return session.effort ?? findModel(session.modelBase)?.defaultEffort ?? null;
 }
 
@@ -535,6 +538,7 @@ function handleAgyEvent(
   eventData: any,
   client: AgentContext,
   session: SessionState,
+  onTurnError?: (err: string) => void,
 ): void {
   const { event } = eventData;
   if (!event) return;
@@ -551,11 +555,13 @@ function handleAgyEvent(
   if (event === "result") {
     const result = eventData.result ?? {};
     if (result.usage) emitUsage(client, session.sessionId, result.usage, session.modelBase);
-    if (result.status && result.status !== "SUCCESS" && result.error) {
-      // Surface agy errors (e.g. invalid model/effort) to the user.
+    if (result.status && result.status !== "SUCCESS") {
+      const errorMessage = result.error || `Execution finished with status ${result.status}`;
+      onTurnError?.(errorMessage);
+      // Surface agy errors (e.g. invalid model/effort, stream interruption) to the user.
       emit(client, session.sessionId, {
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: `Error: ${result.error}\n` },
+        content: { type: "text", text: `Error: ${errorMessage}\n` },
       });
     }
     return;
@@ -622,48 +628,7 @@ function handleAgyEvent(
   }
 }
 
-// --- agy argument builder --------------------------------------------------
 
-function buildAgyArgs(session: SessionState, userPrompt: string): string[] {
-  const args: string[] = ["--print", userPrompt, "--output-format", "stream-json"];
-
-  if (session.conversationId) {
-    args.push("--conversation", session.conversationId);
-  }
-
-  // Model + effort: split form is required (a full effort-baked id conflicts
-  // with --effort, and a base id requires --effort when supported).
-  args.push("--model", session.modelBase);
-  const effort = effectiveEffort(session);
-  if (effort) {
-    args.push("--effort", effort);
-  }
-
-  if (session.modeId !== DEFAULT_MODE_ID) {
-    args.push("--mode", session.modeId);
-  }
-
-  for (const dir of session.additionalDirectories) {
-    args.push("--add-dir", dir);
-  }
-
-  // agy runs headlessly under --print; without auto-approval every command
-  // tool fails silently ("a tool required the 'command' permission that
-  // headless mode cannot prompt for"). Default to skipping permissions unless
-  // --sandbox is set or the caller opts out via AGY_ACP_NO_SKIP_PERMISSIONS=1.
-  const sandbox = process.argv.includes("--sandbox");
-  const optOut = ["1", "true", "yes"].includes(
-    (process.env.AGY_ACP_NO_SKIP_PERMISSIONS ?? "").toLowerCase(),
-  );
-  if (!sandbox && !optOut) {
-    args.push("--dangerously-skip-permissions");
-  }
-  if (sandbox) {
-    args.push("--sandbox");
-  }
-
-  return args;
-}
 
 // --- ACP agent -------------------------------------------------------------
 
@@ -849,7 +814,9 @@ const app = agent({ name: "agy-acp" })
     await syncSessionMcpConfig(session);
 
     const userPrompt = serializePrompt(prompt);
-    const agyArgs = buildAgyArgs(session, userPrompt);
+    const agyArgs = buildAgyArgs(session, userPrompt, {
+      effectiveEffort,
+    });
 
     return new Promise((resolve, reject) => {
       const child = spawn(AGY_EXECUTABLE, agyArgs, {
@@ -859,6 +826,8 @@ const app = agent({ name: "agy-acp" })
       activeProcesses[sessionId] = child;
 
       const turn: PromptTurnResult = { stopReason: "end_turn" };
+      let turnError: string | null = null;
+      let stderrOutput = "";
       // Accumulate raw bytes and split on newline boundaries. Splitting on the
       // data chunk boundary (chunk.toString("utf-8")) corrupts multi-byte
       // UTF-8 characters (e.g. Chinese): a chunk can end mid-character, and
@@ -875,7 +844,9 @@ const app = agent({ name: "agy-acp" })
           buffer = buffer.subarray(newlineIdx + 1);
           if (!line.trim()) continue;
           try {
-            handleAgyEvent(JSON.parse(line), ctx.client, session);
+            handleAgyEvent(JSON.parse(line), ctx.client, session, (err) => {
+              turnError = err;
+            });
           } catch {
             logDebug("raw output:", line);
           }
@@ -884,6 +855,10 @@ const app = agent({ name: "agy-acp" })
 
       child.stderr.on("data", (chunk: Buffer) => {
         process.stderr.write(chunk);
+        stderrOutput += chunk.toString("utf-8");
+        if (stderrOutput.length > 4000) {
+          stderrOutput = stderrOutput.slice(-4000);
+        }
       });
 
       child.on("error", (err) => {
@@ -891,8 +866,8 @@ const app = agent({ name: "agy-acp" })
         const errno = err as NodeJS.ErrnoException;
         reject(
           errno.code === "ENOENT"
-            ? new Error("Failed to start `agy`. Is the Antigravity CLI installed and on PATH?")
-            : err
+            ? new RequestError(-32603, "Failed to start `agy`. Is the Antigravity CLI installed and on PATH?")
+            : new RequestError(-32603, err.message)
         );
       });
 
@@ -901,7 +876,16 @@ const app = agent({ name: "agy-acp" })
         await writeState(state);
 
         const wasKilled = child.killed || code === null;
-        resolve({ stopReason: wasKilled ? "cancelled" : turn.stopReason });
+        if (wasKilled) {
+          resolve({ stopReason: "cancelled" });
+        } else if (turnError) {
+          reject(new RequestError(-32603, turnError));
+        } else if (code !== 0) {
+          const detail = stderrOutput.trim() ? `: ${stderrOutput.trim()}` : "";
+          reject(new RequestError(-32603, `Antigravity process exited with code ${code}${detail}`));
+        } else {
+          resolve({ stopReason: turn.stopReason });
+        }
       });
     });
   })

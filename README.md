@@ -36,6 +36,12 @@ npm install -g agy-acp-bridge
 If `agy` is installed in a non-standard location, point the bridge at it with
 `AGY_ACP_COMMAND=/absolute/path/to/agy`.
 
+To customize the CLI prompt execution timeout (default: `30m` to prevent premature stream cutoffs on long tasks), pass `--print-timeout <duration>` or set `AGY_ACP_PRINT_TIMEOUT=<duration>`:
+
+```bash
+AGY_ACP_PRINT_TIMEOUT=1h agy-acp
+```
+
 Or run directly via `npx`:
 
 ```bash
