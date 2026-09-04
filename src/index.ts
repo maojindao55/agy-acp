@@ -534,11 +534,21 @@ function emitUsage(client: AgentContext, sessionId: string, usage: any, modelBas
   });
 }
 
+interface TurnContext {
+  hasOutputText?: boolean;
+}
+
+function isStreamInterruptedError(err: string | undefined | null): boolean {
+  if (!err) return false;
+  return /The stream was interrupted/i.test(err);
+}
+
 function handleAgyEvent(
   eventData: any,
   client: AgentContext,
   session: SessionState,
   onTurnError?: (err: string) => void,
+  turnContext?: TurnContext,
 ): void {
   const { event } = eventData;
   if (!event) return;
@@ -557,12 +567,26 @@ function handleAgyEvent(
     if (result.usage) emitUsage(client, session.sessionId, result.usage, session.modelBase);
     if (result.status && result.status !== "SUCCESS") {
       const errorMessage = result.error || `Execution finished with status ${result.status}`;
-      onTurnError?.(errorMessage);
-      // Surface agy errors (e.g. invalid model/effort, stream interruption) to the user.
-      emit(client, session.sessionId, {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: `Error: ${errorMessage}\n` },
-      });
+      const hasDeliveredResponse = Boolean(
+        turnContext?.hasOutputText ||
+        (typeof result.response === "string" && result.response.trim().length > 0)
+      );
+      const isHistoricalStreamInterruption =
+        isStreamInterruptedError(errorMessage) && hasDeliveredResponse;
+
+      if (isHistoricalStreamInterruption) {
+        logDebug(
+          "Ignoring stale stream interruption error since valid response was produced in this turn:",
+          errorMessage,
+        );
+      } else {
+        onTurnError?.(errorMessage);
+        // Surface agy errors (e.g. invalid model/effort, stream interruption) to the user.
+        emit(client, session.sessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `Error: ${errorMessage}\n` },
+        });
+      }
     }
     return;
   }
@@ -575,6 +599,9 @@ function handleAgyEvent(
 
   if (step_type === "agent_response") {
     if (text_delta) {
+      if (turnContext) {
+        turnContext.hasOutputText = true;
+      }
       emit(client, session.sessionId, {
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: text_delta },
@@ -827,6 +854,7 @@ const app = agent({ name: "agy-acp" })
 
       const turn: PromptTurnResult = { stopReason: "end_turn" };
       let turnError: string | null = null;
+      const turnContext: TurnContext = { hasOutputText: false };
       let stderrOutput = "";
       // Accumulate raw bytes and split on newline boundaries. Splitting on the
       // data chunk boundary (chunk.toString("utf-8")) corrupts multi-byte
@@ -844,9 +872,15 @@ const app = agent({ name: "agy-acp" })
           buffer = buffer.subarray(newlineIdx + 1);
           if (!line.trim()) continue;
           try {
-            handleAgyEvent(JSON.parse(line), ctx.client, session, (err) => {
-              turnError = err;
-            });
+            handleAgyEvent(
+              JSON.parse(line),
+              ctx.client,
+              session,
+              (err) => {
+                turnError = err;
+              },
+              turnContext,
+            );
           } catch {
             logDebug("raw output:", line);
           }

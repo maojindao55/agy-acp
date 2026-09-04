@@ -16,10 +16,6 @@ test("session/prompt rejects when agy outputs a failed result even with exit cod
   const mockContent = `#!/usr/bin/env node
 console.log(JSON.stringify({ event: "init", conversation_id: "mock-conv-err" }));
 console.log(JSON.stringify({
-  event: "step_update",
-  step_update: { step_index: 0, state: "DONE", step_type: "agent_response", text_delta: "Working on it..." }
-}));
-console.log(JSON.stringify({
   event: "result",
   result: { status: "ERROR", error: "The stream was interrupted. Please continue the task you were working on." }
 }));
@@ -73,6 +69,73 @@ process.exit(0);
           return true;
         },
       );
+
+      session.dispose();
+    });
+  } finally {
+    child.stdin.end();
+    child.kill();
+    await fs.rm(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("session/prompt ignores stale stream interruption error when agent response was delivered", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-stale-err-test-"));
+  const mockAgy = path.join(testRoot, "mock-stale-agy.mjs");
+  const testHome = path.join(testRoot, "home");
+  await fs.mkdir(testHome, { recursive: true });
+
+  const mockContent = `#!/usr/bin/env node
+console.log(JSON.stringify({ event: "init", conversation_id: "mock-conv-stale-err" }));
+console.log(JSON.stringify({
+  event: "step_update",
+  step_update: { step_index: 0, state: "DONE", step_type: "agent_response", text_delta: "Task completed successfully!" }
+}));
+console.log(JSON.stringify({
+  event: "result",
+  result: { status: "ERROR", error: "The stream was interrupted. Please continue the task you were working on." }
+}));
+process.exit(0);
+`;
+  await fs.writeFile(mockAgy, mockContent, { mode: 0o755 });
+
+  const child = spawn(
+    "node",
+    ["dist/index.js"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: testHome,
+        AGY_ACP_COMMAND: mockAgy,
+      },
+    },
+  );
+
+  const stream = ndJsonStream(
+    Writable.toWeb(child.stdin),
+    Readable.toWeb(child.stdout),
+  );
+
+  const receivedUpdates = [];
+  const cli = client({ name: "stale-error-test-client", version: "1.0" });
+
+  try {
+    await cli.connectWith(stream, async (ctx) => {
+      await ctx.request("initialize", {
+        protocolVersion: 1,
+        clientInfo: { name: "test-client", version: "1.0" },
+        clientCapabilities: {},
+      });
+
+      const session = await ctx.buildSession(testRoot).start();
+
+      const res = await ctx.request("session/prompt", {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "say hello" }],
+      });
+
+      assert.equal(res.stopReason, "end_turn");
 
       session.dispose();
     });
