@@ -9,6 +9,7 @@ export const DEFAULT_MODE_ID: ModeId = MODE_ACCEPT_EDITS;
 
 export interface SessionArgsState {
   conversationId?: string;
+  cwd?: string;
   modelBase: string;
   effort: Effort | null;
   modeId: ModeId;
@@ -82,7 +83,12 @@ export function buildAgyArgs(
     args.push("--mode", session.modeId);
   }
 
-  for (const dir of session.additionalDirectories) {
+  const additionalDirs = session.additionalDirectories ?? [];
+  if (session.cwd && !additionalDirs.includes(session.cwd)) {
+    args.push("--add-dir", session.cwd);
+  }
+
+  for (const dir of additionalDirs) {
     args.push("--add-dir", dir);
   }
 

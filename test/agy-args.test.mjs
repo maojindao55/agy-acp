@@ -97,3 +97,28 @@ test("buildAgyArgs includes conversationId when present", () => {
   assert.ok(args.includes("--print-timeout"));
   assert.equal(args[args.indexOf("--print-timeout") + 1], "30m");
 });
+
+test("buildAgyArgs injects cwd as --add-dir and deduplicates with additionalDirectories", () => {
+  const session = {
+    cwd: "/workspace/my-app",
+    modelBase: "gemini-3.7-flash",
+    effort: null,
+    modeId: DEFAULT_MODE_ID,
+    additionalDirectories: ["/workspace/my-app", "/workspace/docs"],
+  };
+
+  const args = buildAgyArgs(session, "test prompt", {
+    argv: ["node", "index.js"],
+    env: {},
+  });
+
+  const addDirArgs = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--add-dir") {
+      addDirArgs.push(args[i + 1]);
+    }
+  }
+
+  assert.deepEqual(addDirArgs, ["/workspace/my-app", "/workspace/docs"]);
+});
+
