@@ -31,6 +31,7 @@ process.exit(0);
       env: {
         ...process.env,
         HOME: testHome,
+        USERPROFILE: testHome,
         AGY_ACP_COMMAND: mockAgy,
       },
     },
@@ -107,6 +108,7 @@ process.exit(0);
       env: {
         ...process.env,
         HOME: testHome,
+        USERPROFILE: testHome,
         AGY_ACP_COMMAND: mockAgy,
       },
     },
@@ -166,6 +168,7 @@ process.exit(1);
       env: {
         ...process.env,
         HOME: testHome,
+        USERPROFILE: testHome,
         AGY_ACP_COMMAND: mockAgy,
       },
     },
@@ -239,6 +242,7 @@ process.exit(0);
       env: {
         ...process.env,
         HOME: testHome,
+        USERPROFILE: testHome,
         AGY_ACP_COMMAND: mockAgy,
       },
     },

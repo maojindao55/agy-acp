@@ -26,8 +26,8 @@ test("official Unix install path works even when it is absent from PATH", async 
     await chmod(executable, 0o755);
 
     assert.equal(
-      resolveAgyExecutable({ env: { PATH: "" }, platform: "linux", homedir: home }),
-      executable,
+      path.resolve(resolveAgyExecutable({ env: { PATH: "" }, platform: "linux", homedir: home })),
+      path.resolve(executable),
     );
   } finally {
     await rm(home, { recursive: true, force: true });

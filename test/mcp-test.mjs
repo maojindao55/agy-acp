@@ -35,7 +35,7 @@ try {
     ["dist/index.js"],
     {
       cwd: process.cwd(),
-      env: { ...process.env, HOME: testHome, DEBUG: "1" },
+      env: { ...process.env, HOME: testHome, USERPROFILE: testHome, DEBUG: "1" },
     },
   );
 

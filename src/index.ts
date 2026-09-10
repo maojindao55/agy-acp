@@ -15,7 +15,7 @@ import type {
   ToolKind,
 } from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -55,6 +55,20 @@ console.log = logDebug;
 const STATE_FILE = path.join(os.homedir(), ".agy-acp-state.json");
 const AGY_EXECUTABLE = resolveAgyExecutable();
 
+function spawnAgy(args: string[], options: any = {}): ChildProcessWithoutNullStreams {
+  const isWindows = process.platform === "win32";
+  const isJsScript = /\.(mjs|js|cjs)$/i.test(AGY_EXECUTABLE);
+  const isBatchScript = isWindows && /\.(cmd|bat)$/i.test(AGY_EXECUTABLE);
+
+  const command = isWindows && isJsScript ? process.execPath : AGY_EXECUTABLE;
+  const commandArgs = isWindows && isJsScript ? [AGY_EXECUTABLE, ...args] : args;
+
+  return spawn(command, commandArgs, {
+    ...options,
+    shell: options?.shell ?? isBatchScript,
+  }) as ChildProcessWithoutNullStreams;
+}
+
 // --- Models ----------------------------------------------------------------
 // agy exposes models via `agy models`. Some embed reasoning effort in the id
 // (gemini-*-high/medium/low), others accept a separate `--effort` flag, and a
@@ -87,7 +101,7 @@ let modelsFetchPromise: Promise<ModelDef[]> | null = null;
 
 function fetchAgyModels(): Promise<ModelDef[] | null> {
   return new Promise((resolve) => {
-    const child = spawn(AGY_EXECUTABLE, ["models"], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnAgy(["models"], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.on("data", (d: Buffer) => {
       out += d.toString("utf-8");
@@ -846,7 +860,7 @@ const app = agent({ name: "agy-acp" })
     });
 
     return new Promise((resolve, reject) => {
-      const child = spawn(AGY_EXECUTABLE, agyArgs, {
+      const child = spawnAgy(agyArgs, {
         cwd: session.cwd,
         env: { ...process.env },
       });
