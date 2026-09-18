@@ -148,6 +148,78 @@ process.exit(0);
   }
 });
 
+test("session/prompt ignores trailing 429/503 errors when agent response was delivered", async () => {
+  const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-trailing-quota-err-test-"));
+  const mockAgy = path.join(testRoot, "mock-quota-agy.mjs");
+  const testHome = path.join(testRoot, "home");
+  await fs.mkdir(testHome, { recursive: true });
+
+  const mockContent = `#!/usr/bin/env node
+console.log(JSON.stringify({ event: "init", conversation_id: "mock-conv-quota-err" }));
+console.log(JSON.stringify({
+  event: "step_update",
+  step_update: { step_index: 0, state: "DONE", step_type: "agent_response", text_delta: "Here is your solution!" }
+}));
+console.log(JSON.stringify({
+  event: "result",
+  result: {
+    status: "ERROR",
+    error: "RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota)."
+  }
+}));
+process.exit(0);
+`;
+  await fs.writeFile(mockAgy, mockContent, { mode: 0o755 });
+
+  const child = spawn(
+    "node",
+    ["dist/index.js"],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HOME: testHome,
+        USERPROFILE: testHome,
+        AGY_ACP_COMMAND: mockAgy,
+      },
+    },
+  );
+
+  const stream = ndJsonStream(
+    Writable.toWeb(child.stdin),
+    Readable.toWeb(child.stdout),
+  );
+
+  const errorChunks = [];
+  const cli = client({ name: "trailing-quota-client", version: "1.0" });
+
+  try {
+    await cli.connectWith(stream, async (ctx) => {
+      await ctx.request("initialize", {
+        protocolVersion: 1,
+        clientInfo: { name: "test-client", version: "1.0" },
+        clientCapabilities: {},
+      });
+
+      const session = await ctx.buildSession(testRoot).start();
+
+      const res = await ctx.request("session/prompt", {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "write code" }],
+      });
+
+      assert.equal(res.stopReason, "end_turn");
+      assert.equal(errorChunks.length, 0);
+
+      session.dispose();
+    });
+  } finally {
+    child.stdin.end();
+    child.kill();
+    await fs.rm(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("session/prompt rejects when agy process exits with non-zero exit code", async () => {
   const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-crash-test-"));
   const mockAgy = path.join(testRoot, "mock-crash-agy.mjs");

@@ -552,11 +552,6 @@ interface TurnContext {
   hasOutputText?: boolean;
 }
 
-function isStreamInterruptedError(err: string | undefined | null): boolean {
-  if (!err) return false;
-  return /The stream was interrupted/i.test(err);
-}
-
 function handleAgyEvent(
   eventData: any,
   client: AgentContext,
@@ -585,17 +580,21 @@ function handleAgyEvent(
         turnContext?.hasOutputText ||
         (typeof result.response === "string" && result.response.trim().length > 0)
       );
-      const isHistoricalStreamInterruption =
-        isStreamInterruptedError(errorMessage) && hasDeliveredResponse;
 
-      if (isHistoricalStreamInterruption) {
+      // When a valid assistant response has already been delivered to the client
+      // in this turn, any trailing errors in `result` (such as historical stream
+      // interruptions, post-turn 429 quota exhaustion, 503 capacity limits, or
+      // connection teardown glitches) are benign trailing errors. We log them for
+      // debugging but do not fail the turn or inject an error block that invalidates
+      // the completed assistant reply.
+      if (hasDeliveredResponse) {
         logDebug(
-          "Ignoring stale stream interruption error since valid response was produced in this turn:",
+          "Ignoring trailing agy result error since valid response was produced in this turn:",
           errorMessage,
         );
       } else {
         onTurnError?.(errorMessage);
-        // Surface agy errors (e.g. invalid model/effort, stream interruption) to the user.
+        // Surface agy errors (e.g. invalid model/effort, early quota exhaustion) to the user.
         emit(client, session.sessionId, {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: `Error: ${errorMessage}\n` },
