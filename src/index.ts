@@ -700,6 +700,21 @@ const app = agent({ name: "agy-acp" })
           additionalDirectories: {},
         },
       },
+      authMethods: [
+        {
+          id: "google-account",
+          name: "Google account",
+          description:
+            "agy signs in with your Google account. Run `agy-acp --login` (or launch `agy` interactively) to complete sign-in.",
+        },
+        {
+          type: "terminal",
+          id: "agy-login",
+          name: "Terminal sign-in",
+          description: "Launch the agy interactive CLI to complete Google sign-in",
+          args: ["--login"],
+        },
+      ],
     };
   })
   .onRequest("session/new", async (ctx) => {
@@ -954,9 +969,20 @@ const app = agent({ name: "agy-acp" })
 
 // --- stdio streaming -------------------------------------------------------
 
-const stream = ndJsonStream(
-  Writable.toWeb(process.stdout) as any,
-  Readable.toWeb(process.stdin) as any,
-);
+if (process.argv.includes("--login")) {
+  // Terminal-auth entry point: hand the terminal to the agy TUI so the user can
+  // complete Google sign-in, then exit instead of starting the ACP loop.
+  const child = spawn(AGY_EXECUTABLE, [], { stdio: "inherit" });
+  child.on("error", (err) => {
+    logError(`Failed to launch agy: ${err.message}`);
+    process.exit(1);
+  });
+  child.on("exit", (code) => process.exit(code ?? 0));
+} else {
+  const stream = ndJsonStream(
+    Writable.toWeb(process.stdout) as any,
+    Readable.toWeb(process.stdin) as any,
+  );
 
-app.connect(stream);
+  app.connect(stream);
+}
