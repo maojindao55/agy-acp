@@ -32,6 +32,16 @@ import {
   DEFAULT_MODE_ID,
   buildAgyArgs,
 } from "./agyArgs.js";
+import {
+  buildToolCallDiffs,
+  readStepOutputText,
+  readTranscriptToolCallArgs,
+} from "./toolDiff.js";
+export {
+  buildToolCallDiffs,
+  readStepOutputText,
+  readTranscriptToolCallArgs,
+} from "./toolDiff.js";
 
 const { version: VERSION } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
@@ -526,6 +536,18 @@ function extractLocation(parameters: unknown): ToolCallLocation | null {
   return typeof filePath === "string" ? { path: filePath } : null;
 }
 
+
+const activeToolCallsBySession = new Map<string, Map<string, { toolName?: string; parameters?: unknown }>>();
+
+function getSessionToolCalls(sessionId: string): Map<string, { toolName?: string; parameters?: unknown }> {
+  let map = activeToolCallsBySession.get(sessionId);
+  if (!map) {
+    map = new Map();
+    activeToolCallsBySession.set(sessionId, map);
+  }
+  return map;
+}
+
 // --- agy event handling ----------------------------------------------------
 
 interface PromptTurnResult {
@@ -631,8 +653,10 @@ function handleAgyEvent(
     const toolCallId = `tool-${step.step_index}`;
     const info = tool_info ?? {};
     const parameters = info.parameters;
+    const sessionTools = getSessionToolCalls(session.sessionId);
 
     if (state === "ACTIVE") {
+      sessionTools.set(toolCallId, { toolName: tool_name, parameters });
       const location = extractLocation(parameters);
       let title = tool_name ? tool_name : "Running tool";
       if (tool_name === "call_mcp_tool") {
@@ -653,16 +677,56 @@ function handleAgyEvent(
         locations: location ? [location] : undefined,
       });
     } else if (state === "DONE" || state === "ERROR") {
+      const saved = sessionTools.get(toolCallId);
+      sessionTools.delete(toolCallId);
+      const effectiveToolName = tool_name || saved?.toolName || "";
+      let effectiveParams = (parameters ?? saved?.parameters) as Record<string, unknown> | undefined;
+
       const failed = state === "ERROR";
-      const outputText = failed
+      let outputText = failed
         ? info?.error?.message ?? "Tool execution failed"
         : (info?.output ?? "");
+
+      const convId = step.conversation_id || session.conversationId;
+      if (!failed && convId) {
+        if (!outputText) {
+          const diskOutput = readStepOutputText(convId, step.step_index);
+          if (diskOutput) {
+            outputText = diskOutput;
+          }
+        }
+        const hasSnippet =
+          effectiveParams?.TargetContent ||
+          effectiveParams?.CodeContent ||
+          effectiveParams?.Replacements;
+        if (!hasSnippet) {
+          const transcriptArgs = readTranscriptToolCallArgs(convId, effectiveToolName, step.step_index);
+          if (transcriptArgs) {
+            effectiveParams = { ...transcriptArgs, ...effectiveParams };
+          }
+        }
+      }
+
+      const contentItems: any[] = [];
+      if (!failed) {
+        const diffs = buildToolCallDiffs(effectiveToolName, effectiveParams, outputText);
+        contentItems.push(...diffs);
+      }
+      if (outputText) {
+        contentItems.push({ type: "content", content: { type: "text", text: outputText } });
+      }
+
+      const location = extractLocation(effectiveParams);
+
       emit(client, session.sessionId, {
         sessionUpdate: "tool_call_update",
         toolCallId,
+        title: effectiveToolName ? effectiveToolName : undefined,
+        kind: mapToolKind(effectiveToolName),
         status: failed ? "failed" : "completed",
         rawOutput: failed ? info.error : outputText,
-        content: outputText ? [{ type: "content", content: { type: "text", text: outputText } }] : undefined,
+        locations: location ? [location] : undefined,
+        content: contentItems.length ? contentItems : undefined,
       });
     }
   }
@@ -754,6 +818,7 @@ const app = agent({ name: "agy-acp" })
   })
   .onRequest("session/delete", async (ctx) => {
     const { sessionId } = ctx.params;
+    activeToolCallsBySession.delete(sessionId);
     const state = await readState();
     delete state.sessions[sessionId];
     await writeState(state);
@@ -852,6 +917,7 @@ const app = agent({ name: "agy-acp" })
   })
   .onRequest("session/close", async (ctx) => {
     const { sessionId } = ctx.params;
+    activeToolCallsBySession.delete(sessionId);
     const child = activeProcesses[sessionId];
     if (child) {
       child.kill("SIGINT");
