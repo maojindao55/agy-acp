@@ -98,6 +98,12 @@ function getCurrentBranch() {
 async function main() {
   console.log('\n\x1b[1m\x1b[35m🚀 agy-acp-bridge 一键发布助手\x1b[0m\n')
 
+  const args = process.argv.slice(2)
+  const skipNpm = args.includes('--skip-npm')
+  const autoYes = args.includes('--yes') || args.includes('-y')
+  const cleanArgs = args.filter((a) => !a.startsWith('-'))
+  let releaseType = cleanArgs[0]
+
   // 0.1 检查 Git 工作区是否干净（防止 git 与 npm 版本不一致）
   const gitStatus = checkGitStatus()
   if (gitStatus) {
@@ -118,24 +124,25 @@ async function main() {
   // 0.2 检查 Git 当前分支
   const currentBranch = getCurrentBranch()
   if (currentBranch !== 'main' && currentBranch !== 'master') {
-    const branchConfirm = await prompt(
-      `当前处于分支 [\x1b[33m${currentBranch}\x1b[0m]，非主分支，是否确认继续发布？(y/N): `
-    )
-    if (branchConfirm.toLowerCase() !== 'y') {
-      console.log('\x1b[31m发布已取消。\x1b[0m')
-      process.exit(0)
+    if (!autoYes) {
+      const branchConfirm = await prompt(
+        `当前处于分支 [\x1b[33m${currentBranch}\x1b[0m]，非主分支，是否确认继续发布？(y/N): `
+      )
+      if (branchConfirm.toLowerCase() !== 'y') {
+        console.log('\x1b[31m发布已取消。\x1b[0m')
+        process.exit(0)
+      }
     }
   }
 
   // 0.3 前置校验 npm 登录状态
   const npmUser = checkNpmAuth()
   if (!npmUser) {
-    console.error('\x1b[31m✖ 发布前检查失败: 您尚未登录 npm 官方源！\x1b[0m')
-    console.error('为了避免发布中断并产生脏 Git 提交/Tag，请先在终端执行登录：\n')
-    console.error('  \x1b[36m➜ npm login --registry https://registry.npmjs.org/\x1b[0m\n')
-    process.exit(1)
+    console.warn('\x1b[33m⚠ 提示: 当前本地尚未登录 npm 官方源。\x1b[0m')
+    console.warn('  将跳过本地 npm publish，代码及 Tag 推送后由 GitHub Actions CI 依据 NPM_TOKEN 自动发布到 npm。\n')
+  } else {
+    console.log(`npm 鉴权账号: \x1b[36m${npmUser}\x1b[0m`)
   }
-  console.log(`npm 鉴权账号: \x1b[36m${npmUser}\x1b[0m`)
 
   // 0.4 前置执行类型检查与自动化测试
   console.log('\n\x1b[1m➜ 执行类型检查 (npm run typecheck)...\x1b[0m')
@@ -152,7 +159,6 @@ async function main() {
   console.log(`当前项目: \x1b[36m${packageName}\x1b[0m, 版本: \x1b[32mv${currentVersion}\x1b[0m\n`)
 
   // 1. 确定新版本号
-  let releaseType = process.argv[2]
   if (!releaseType) {
     console.log('请选择发布版本类型:')
     console.log(`  1) patch (\x1b[33mv${getNextVersion(currentVersion, 'patch')}\x1b[0m - 缺陷修复/微调)`)
@@ -173,10 +179,12 @@ async function main() {
   const newVersion = getNextVersion(currentVersion, releaseType)
   console.log(`\n准备发布版本: \x1b[1m\x1b[32mv${newVersion}\x1b[0m\n`)
 
-  const confirm = await prompt(`确认发布 v${newVersion} 吗？(y/N): `)
-  if (confirm.toLowerCase() !== 'y') {
-    console.log('\x1b[31m发布已取消。\x1b[0m')
-    process.exit(0)
+  if (!autoYes) {
+    const confirm = await prompt(`确认发布 v${newVersion} 吗？(y/N): `)
+    if (confirm.toLowerCase() !== 'y') {
+      console.log('\x1b[31m发布已取消。\x1b[0m')
+      process.exit(0)
+    }
   }
 
   // 2. 编译构建
@@ -215,9 +223,13 @@ async function main() {
     throw err
   }
 
-  // 5. 推送 Git (可选)
-  const pushGit = await prompt('\n是否推送到 Git 远程仓库及 Tags？(Y/n): ')
-  if (pushGit.toLowerCase() !== 'n') {
+  // 5. 推送 Git
+  let shouldPush = true
+  if (!autoYes) {
+    const pushGit = await prompt('\n是否推送到 Git 远程仓库及 Tags？(Y/n): ')
+    shouldPush = pushGit.toLowerCase() !== 'n'
+  }
+  if (shouldPush) {
     try {
       run('git push')
       run('git push --tags')
@@ -227,28 +239,32 @@ async function main() {
   }
 
   // 6. 发布到 npm
-  console.log(`\n\x1b[1m[4/5] 发布到 npm 官方仓库 (${packageName}@${newVersion})...\x1b[0m`)
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   let published = false
-  let lastError = null
+  if (npmUser && !skipNpm) {
+    console.log(`\n\x1b[1m[4/5] 发布到 npm 官方仓库 (${packageName}@${newVersion})...\x1b[0m`)
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+    let lastError = null
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      run('npm publish --access public --registry https://registry.npmjs.org/')
-      published = true
-      console.log(`\x1b[32m✔ ${packageName}@${newVersion} 发布成功！\x1b[0m`)
-      break
-    } catch (err) {
-      lastError = err
-      if (attempt === 1) {
-        console.warn(`\x1b[33m首次发布遇到抖动，等待 3 秒后重试...\x1b[0m`)
-        await sleep(3000)
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        run('npm publish --access public --registry https://registry.npmjs.org/')
+        published = true
+        console.log(`\x1b[32m✔ ${packageName}@${newVersion} 发布成功！\x1b[0m`)
+        break
+      } catch (err) {
+        lastError = err
+        if (attempt === 1) {
+          console.warn(`\x1b[33m首次发布遇到抖动，等待 3 秒后重试...\x1b[0m`)
+          await sleep(3000)
+        }
       }
     }
-  }
 
-  if (!published) {
-    console.error(`\x1b[31m✖ ${packageName}@${newVersion} 发布失败: ${lastError?.message || lastError}\x1b[0m`)
+    if (!published) {
+      console.error(`\x1b[31m✖ ${packageName}@${newVersion} 本地发布失败: ${lastError?.message || lastError}\x1b[0m`)
+    }
+  } else {
+    console.log(`\n\x1b[1m[4/5] 跳过本地 npm publish，将由 GitHub Actions CI 依据 Tag 自动发布到 npm。\x1b[0m`)
   }
 
   // 7. 自动触发国内 npmmirror 同步
@@ -263,7 +279,9 @@ async function main() {
   // 8. 成功提示
   console.log('\n\x1b[1m\x1b[32m🎉 发布流程结束！\x1b[0m\n')
   console.log('发布结果摘要:')
-  console.log(`  - \x1b[1m${packageName}\x1b[0m: ${published ? '\x1b[32m发布成功 ✔\x1b[0m' : '\x1b[31m发布失败 ✖\x1b[0m'}`)
+  console.log(`  - 版本: \x1b[1mv${newVersion}\x1b[0m`)
+  console.log(`  - Git Tag: \x1b[1mv${newVersion}\x1b[0m`)
+  console.log(`  - 本地 npm 发布: ${published ? '\x1b[32m成功 ✔\x1b[0m' : '\x1b[33m已交由 GitHub Actions CI 自动发布 ⚡\x1b[0m'}`)
   console.log('\n国内/国际安装测试:')
   console.log(`  npx ${packageName}@${newVersion}`)
   console.log(`  npm install -g ${packageName}@${newVersion}\n`)
