@@ -6,6 +6,8 @@ import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
+import { SessionMcpConfigs } from "../dist/sessionMcpConfig.js";
+import { SessionStore } from "../dist/sessionStore.js";
 import { client, ndJsonStream } from "@agentclientprotocol/sdk";
 
 const execFileAsync = promisify(execFile);
@@ -27,15 +29,18 @@ await Promise.all([
   fs.mkdir(testHome, { recursive: true }),
 ]);
 
+const isolatedConfigs = new SessionMcpConfigs(testHome);
 try {
   console.log("Using test workspace:", testDir);
 
+  const preload = path.join(testRoot, "home.mjs");
+  await fs.writeFile(preload, `import os from 'node:os'; import {syncBuiltinESMExports} from 'node:module'; os.homedir=()=>${JSON.stringify(testHome)}; syncBuiltinESMExports();`);
   const child = spawn(
     "node",
-    ["dist/index.js"],
+    ["--import", preload, "dist/index.js"],
     {
       cwd: process.cwd(),
-      env: { ...process.env, HOME: testHome, USERPROFILE: testHome, DEBUG: "1" },
+      env: { ...process.env, DEBUG: "1" },
     },
   );
 
@@ -80,10 +85,12 @@ try {
     console.log("Session started:", session.sessionId);
 
     // 3. Verify .agents/mcp_config.json was created and populated
-    const mcpConfigFile = path.join(testDir, ".agents", "mcp_config.json");
+    const stored = await new SessionStore(testHome, value => value).get(session.sessionId);
+    const isolatedDir = await isolatedConfigs.prepare(session.sessionId, stored.mcpServers);
+    const mcpConfigFile = path.join(isolatedDir, "config", "mcp_config.json");
     const mcpConfigContent = await fs.readFile(mcpConfigFile, "utf-8");
     const parsedMcpConfig = JSON.parse(mcpConfigContent);
-    console.log("Generated mcp_config.json content:", JSON.stringify(parsedMcpConfig, null, 2));
+    console.log("Session-private MCP configuration created successfully");
 
     if (!parsedMcpConfig.mcpServers?.["test-stdio-server"]) {
       throw new Error("Missing test-stdio-server in mcp_config.json");
@@ -114,9 +121,10 @@ try {
     );
     assert.equal(resumedSession?.cwd, resumedDir);
 
-    const stateFile = path.join(testHome, ".agy-acp-state.json");
-    const persistedState = JSON.parse(await fs.readFile(stateFile, "utf-8"));
-    assert.equal(persistedState.sessions[session.sessionId]?.cwd, resumedDir);
+    const persistedSession = await new SessionStore(testHome, value => value).get(session.sessionId);
+    assert.equal(persistedSession?.cwd, resumedDir);
+    await assert.rejects(fs.access(path.join(testDir, ".agents", "mcp_config.json")));
+    await assert.rejects(fs.access(path.join(testHome, ".gemini", "config", "mcp_config.json")));
 
     console.log(" All MCP injection and session resume assertions passed successfully!");
     session.dispose();
@@ -125,5 +133,6 @@ try {
   child.stdin.end();
   child.kill();
 } finally {
+  isolatedConfigs.dispose();
   await fs.rm(testRoot, { recursive: true, force: true });
 }

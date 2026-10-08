@@ -4,13 +4,9 @@ import type {
   AgentContext,
   ContentBlock,
   McpServer,
-  McpServerHttp,
-  McpServerSse,
-  McpServerStdio,
   SessionConfigOption,
   SessionModeState,
   SessionUpdate,
-  StopReason,
   ToolCallLocation,
   ToolKind,
 } from "@agentclientprotocol/sdk";
@@ -22,6 +18,12 @@ import * as path from "node:path";
 import * as os from "node:os";
 import crypto from "node:crypto";
 import { resolveAgyExecutable } from "./agyExecutable.js";
+import { AgyTurnUsage } from "./turnUsage.js";
+import { NativeSession, NativeTurnCancelled } from "./nativeSession.js";
+import { cachedModels } from "./modelCache.js";
+import { SessionStore } from "./sessionStore.js";
+import { SessionMcpConfigs } from "./sessionMcpConfig.js";
+import { BoundedUpdates } from "./boundedUpdates.js";
 import {
   EFFORTS,
   type Effort,
@@ -35,7 +37,7 @@ import {
 import {
   buildToolCallDiffs,
   readStepOutputText,
-  readTranscriptToolCallArgs,
+  resolveToolCallParameters,
 } from "./toolDiff.js";
 export {
   buildToolCallDiffs,
@@ -62,7 +64,6 @@ const logError = (...args: unknown[]) => {
 };
 console.log = logDebug;
 
-const STATE_FILE = path.join(os.homedir(), ".agy-acp-state.json");
 const AGY_EXECUTABLE = resolveAgyExecutable();
 
 function spawnAgy(args: string[], options: any = {}): ChildProcessWithoutNullStreams {
@@ -113,6 +114,9 @@ function fetchAgyModels(): Promise<ModelDef[] | null> {
   return new Promise((resolve) => {
     const child = spawnAgy(["models"], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
+    const timeout = setTimeout(() => { child.kill("SIGTERM"); resolve(null); }, 30_000);
+    child.once("close", () => clearTimeout(timeout));
+    child.once("error", () => clearTimeout(timeout));
     child.stdout.on("data", (d: Buffer) => {
       out += d.toString("utf-8");
     });
@@ -168,7 +172,14 @@ function fetchAgyModels(): Promise<ModelDef[] | null> {
 
 async function getAvailableModels(): Promise<ModelDef[]> {
   if (!modelsFetchPromise) {
-    modelsFetchPromise = fetchAgyModels()
+    modelsFetchPromise = cachedModels<ModelDef>({
+      file: path.join(os.homedir(), ".agy-acp-models.json"), executable: AGY_EXECUTABLE,
+      fallback: dynamicModels, fetch: fetchAgyModels,
+      valid: (value): value is ModelDef[] => Array.isArray(value) && value.length > 0 && value.every(m =>
+        m && typeof m.base === "string" && typeof m.name === "string" && Number.isFinite(m.contextWindow) &&
+        m.contextWindow > 0 && typeof m.supportsEffort === "boolean" &&
+        (m.defaultEffort === null || EFFORTS.includes(m.defaultEffort))),
+    })
       .then((models) => {
         if (models && models.length > 0) {
           dynamicModels = models;
@@ -254,10 +265,6 @@ interface SessionState {
   mcpServers?: McpServer[];
 }
 
-interface StateData {
-  sessions: Record<string, SessionState>;
-}
-
 // Upgrades a raw (possibly legacy) session record to the current schema.
 function migrateSession(raw: any): SessionState {
   if (raw.modelBase) {
@@ -288,146 +295,54 @@ function migrateSession(raw: any): SessionState {
 
 // --- MCP Server synchronization --------------------------------------------
 
-interface AgyMcpServerStdio {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-}
-
-interface AgyMcpServerSse {
-  serverUrl: string;
-  headers?: Record<string, string>;
-}
-
-type AgyMcpServer = AgyMcpServerStdio | AgyMcpServerSse;
-
-interface AgyMcpConfig {
-  mcpServers: Record<string, AgyMcpServer>;
-}
-
-function convertToAgyMcpConfig(mcpServers: McpServer[]): Record<string, AgyMcpServer> {
-  const result: Record<string, AgyMcpServer> = {};
-  for (const s of mcpServers) {
-    if (!s || typeof s !== "object") continue;
-    const name = s.name;
-    if (!name) continue;
-
-    if ("type" in s && (s.type === "sse" || s.type === "http")) {
-      const sseServer = s as McpServerSse | McpServerHttp;
-      let headers: Record<string, string> | undefined = undefined;
-      if (Array.isArray(sseServer.headers)) {
-        headers = {};
-        for (const h of sseServer.headers) {
-          if (h && typeof h === "object" && h.name && h.value !== undefined) {
-            headers[h.name] = String(h.value);
-          }
-        }
-      } else if (sseServer.headers && typeof sseServer.headers === "object") {
-        headers = sseServer.headers as Record<string, string>;
-      }
-
-      result[name] = {
-        serverUrl: sseServer.url,
-        ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
-      };
-    } else {
-      // Stdio server (type === "stdio" or McpServerStdio)
-      const stdioServer = s as McpServerStdio;
-      let env: Record<string, string> | undefined = undefined;
-      if (Array.isArray(stdioServer.env)) {
-        env = {};
-        for (const e of stdioServer.env) {
-          if (e && typeof e === "object" && e.name && e.value !== undefined) {
-            env[e.name] = String(e.value);
-          }
-        }
-      } else if (stdioServer.env && typeof stdioServer.env === "object") {
-        env = stdioServer.env as Record<string, string>;
-      }
-
-      result[name] = {
-        command: stdioServer.command,
-        args: Array.isArray(stdioServer.args) ? stdioServer.args : [],
-        ...(env && Object.keys(env).length > 0 ? { env } : {}),
-      };
-    }
-  }
-  return result;
-}
+const sessions = new SessionStore<SessionState>(os.homedir(), migrateSession);
+const mcpConfigs = new SessionMcpConfigs();
+const boundedUpdates = new BoundedUpdates();
 
 function sanitizeCwd(cwd: string | undefined): string {
-  if (!cwd || cwd === "/" || cwd === ".") {
-    return os.homedir();
-  }
+  if (!cwd || cwd === "/" || cwd === ".") return os.homedir();
   return cwd;
 }
 
-async function syncSessionMcpConfig(session: SessionState): Promise<void> {
-  if (!session.mcpServers || session.mcpServers.length === 0) return;
-  const convertedServers = convertToAgyMcpConfig(session.mcpServers);
-  if (Object.keys(convertedServers).length === 0) return;
-
-  const targetDirs = [
-    path.join(sanitizeCwd(session.cwd), ".agents"),
-    path.join(os.homedir(), ".gemini", "config"),
-  ];
-
-  for (const dir of targetDirs) {
-    try {
-      const configFile = path.join(dir, "mcp_config.json");
-      let existingConfig: AgyMcpConfig = { mcpServers: {} };
-      try {
-        const content = await fs.readFile(configFile, "utf-8");
-        const parsed = JSON.parse(content);
-        if (parsed && typeof parsed === "object" && parsed.mcpServers) {
-          existingConfig = parsed;
-        }
-      } catch {
-        // No existing config file or invalid JSON, start fresh
-      }
-
-      const mergedConfig: AgyMcpConfig = {
-        ...existingConfig,
-        mcpServers: {
-          ...(existingConfig.mcpServers || {}),
-          ...convertedServers,
-        },
-      };
-
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(configFile, JSON.stringify(mergedConfig, null, 2), "utf-8");
-      logDebug("Synchronized MCP servers into", configFile);
-    } catch (err) {
-      logError(`Failed to synchronize MCP config into ${dir}:`, err);
-    }
-  }
-}
-
-async function readState(): Promise<StateData> {
-  try {
-    const data = await fs.readFile(STATE_FILE, "utf-8");
-    const parsed = JSON.parse(data) as { sessions: Record<string, any> };
-    const sessions: Record<string, SessionState> = {};
-    for (const [id, raw] of Object.entries(parsed.sessions ?? {})) {
-      sessions[id] = migrateSession(raw);
-    }
-    return { sessions };
-  } catch {
-    return { sessions: {} };
-  }
-}
-
-async function writeState(state: StateData): Promise<void> {
-  try {
-    await fs.mkdir(path.dirname(STATE_FILE), { recursive: true });
-    await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
-  } catch (err) {
-    logError("Failed to write state file:", err);
-  }
+function syncSessionMcpConfig(session: SessionState): Promise<string> {
+  return mcpConfigs.prepare(session.sessionId, session.mcpServers ?? []);
 }
 
 // Active child processes keyed by sessionId, for cancellation/close.
 const activeProcesses: Record<string, ReturnType<typeof spawn>> = {};
+
+const nativeSessions = new Map<string, NativeSession>();
+let persistentSupport: Promise<boolean> | undefined;
+function supportsPersistentInput(): Promise<boolean> {
+  if (process.env.AGY_ACP_PERSISTENT === "0") return Promise.resolve(false);
+  return persistentSupport ??= new Promise(resolve => {
+    const child = spawnAgy(["--help"], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    const timeout = setTimeout(() => { child.kill(); resolve(false); }, 3000);
+    const collect = (chunk: Buffer) => { output = (output + chunk).slice(-64_000); };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.on("error", () => { clearTimeout(timeout); resolve(false); });
+    child.on("close", code => { clearTimeout(timeout); resolve(code === 0 && output.includes("--input-format") && output.includes("stream-json")); });
+  });
+}
+function closeNativeSession(sessionId: string, cancel = false): void {
+  nativeSessions.get(sessionId)?.dispose(cancel);
+  nativeSessions.delete(sessionId);
+}
+function closeAllNativeSessions(): void {
+  for (const sessionId of nativeSessions.keys()) closeNativeSession(sessionId, true);
+  for (const child of Object.values(activeProcesses)) child.kill("SIGTERM");
+  mcpConfigs.dispose();
+  boundedUpdates.dispose();
+}
+process.stdin.once("end", closeAllNativeSessions);
+process.once("exit", closeAllNativeSessions);
+for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => {
+  closeAllNativeSessions();
+  process.exit(0);
+});
+
 
 // --- Config options --------------------------------------------------------
 
@@ -550,12 +465,10 @@ function getSessionToolCalls(sessionId: string): Map<string, { toolName?: string
 
 // --- agy event handling ----------------------------------------------------
 
-interface PromptTurnResult {
-  stopReason: StopReason;
-}
-
 function emit(client: AgentContext, sessionId: string, update: SessionUpdate): void {
-  void client.notify("session/update", { sessionId, update });
+  for (const bounded of boundedUpdates.prepare(sessionId, update)) {
+    void client.notify("session/update", { sessionId, update: bounded });
+  }
 }
 
 function emitUsage(client: AgentContext, sessionId: string, usage: any, modelBase: string): void {
@@ -572,6 +485,7 @@ function emitUsage(client: AgentContext, sessionId: string, usage: any, modelBas
 
 interface TurnContext {
   hasOutputText?: boolean;
+  usage: AgyTurnUsage;
 }
 
 function handleAgyEvent(
@@ -595,7 +509,8 @@ function handleAgyEvent(
 
   if (event === "result") {
     const result = eventData.result ?? {};
-    if (result.usage) emitUsage(client, session.sessionId, result.usage, session.modelBase);
+    // result.usage is cumulative across the native conversation, so it cannot
+    // represent this turn's tokens or the latest model context occupancy.
     if (result.status && result.status !== "SUCCESS") {
       const errorMessage = result.error || `Execution finished with status ${result.status}`;
       const hasDeliveredResponse = Boolean(
@@ -630,6 +545,7 @@ function handleAgyEvent(
 
   const step = eventData.step_update;
   if (!step) return;
+  turnContext?.usage.observeStep(step);
   const { step_type, state, text_delta, tool_name, tool_info } = step;
 
   if (step_type === "agent_response") {
@@ -695,16 +611,7 @@ function handleAgyEvent(
             outputText = diskOutput;
           }
         }
-        const hasSnippet =
-          effectiveParams?.TargetContent ||
-          effectiveParams?.CodeContent ||
-          effectiveParams?.Replacements;
-        if (!hasSnippet) {
-          const transcriptArgs = readTranscriptToolCallArgs(convId, effectiveToolName, step.step_index);
-          if (transcriptArgs) {
-            effectiveParams = { ...transcriptArgs, ...effectiveParams };
-          }
-        }
+        effectiveParams = resolveToolCallParameters(convId, effectiveToolName, step.step_index, effectiveParams);
       }
 
       const contentItems: any[] = [];
@@ -737,9 +644,11 @@ function handleAgyEvent(
 // --- ACP agent -------------------------------------------------------------
 
 const app = agent({ name: "agy-acp" })
-  .onRequest("initialize", () => {
+  .onRequest("initialize", async (ctx) => {
+    boundedUpdates.localDiffFiles = (ctx.params.clientCapabilities?._meta?.freebuddy as { localDiffFiles?: unknown } | undefined)?.localDiffFiles === 1;
     return {
       protocolVersion: PROTOCOL_VERSION,
+      _meta: { freebuddy: { persistentSession: await supportsPersistentInput() } },
       agentInfo: {
         name: "agy-acp",
         title: "Google Antigravity",
@@ -787,7 +696,6 @@ const app = agent({ name: "agy-acp" })
 
     await getAvailableModels();
 
-    const state = await readState();
     const session: SessionState = {
       sessionId,
       cwd: sanitizeCwd(cwd),
@@ -797,8 +705,7 @@ const app = agent({ name: "agy-acp" })
       additionalDirectories: additionalDirectories ?? [],
       mcpServers: mcpServers ?? [],
     };
-    state.sessions[sessionId] = session;
-    await writeState(state);
+    await sessions.set(session);
     await syncSessionMcpConfig(session);
 
     return {
@@ -808,9 +715,8 @@ const app = agent({ name: "agy-acp" })
     };
   })
   .onRequest("session/list", async () => {
-    const state = await readState();
     return {
-      sessions: Object.values(state.sessions).map((s) => ({
+      sessions: (await sessions.list()).map((s) => ({
         sessionId: s.sessionId,
         cwd: s.cwd,
       })),
@@ -819,15 +725,14 @@ const app = agent({ name: "agy-acp" })
   .onRequest("session/delete", async (ctx) => {
     const { sessionId } = ctx.params;
     activeToolCallsBySession.delete(sessionId);
-    const state = await readState();
-    delete state.sessions[sessionId];
-    await writeState(state);
+    closeNativeSession(sessionId, true);
+    mcpConfigs.release(sessionId);
+    await sessions.delete(sessionId);
   })
   .onRequest("session/load", async (ctx) => {
     const { sessionId, cwd, additionalDirectories, mcpServers } = ctx.params;
     await getAvailableModels();
-    const state = await readState();
-    const session = state.sessions[sessionId];
+    const session = await sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
     }
@@ -840,7 +745,7 @@ const app = agent({ name: "agy-acp" })
     if (mcpServers !== undefined) {
       session.mcpServers = mcpServers;
     }
-    await writeState(state);
+    await sessions.set(session);
     await syncSessionMcpConfig(session);
 
     return {
@@ -852,8 +757,7 @@ const app = agent({ name: "agy-acp" })
   .onRequest("session/resume", async (ctx) => {
     const { sessionId, cwd, additionalDirectories, mcpServers } = ctx.params;
     await getAvailableModels();
-    const state = await readState();
-    const session = state.sessions[sessionId];
+    const session = await sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
     }
@@ -866,7 +770,7 @@ const app = agent({ name: "agy-acp" })
     if (mcpServers !== undefined) {
       session.mcpServers = mcpServers;
     }
-    await writeState(state);
+    await sessions.set(session);
     await syncSessionMcpConfig(session);
 
     return {
@@ -877,14 +781,13 @@ const app = agent({ name: "agy-acp" })
   })
   .onRequest("session/set_mode", async (ctx) => {
     const { sessionId, modeId } = ctx.params;
-    const state = await readState();
-    const session = state.sessions[sessionId];
+    const session = await sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
     if (!MODE_IDS.includes(modeId as ModeId)) {
       throw new Error(`Unknown mode ${modeId}`);
     }
     session.modeId = modeId as ModeId;
-    await writeState(state);
+    await sessions.set(session);
 
     emit(ctx.client, sessionId, {
       sessionUpdate: "current_mode_update",
@@ -894,8 +797,7 @@ const app = agent({ name: "agy-acp" })
   .onRequest("session/set_config_option", async (ctx) => {
     const { sessionId, configId } = ctx.params;
     await getAvailableModels();
-    const state = await readState();
-    const session = state.sessions[sessionId];
+    const session = await sessions.get(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
 
     if (configId === "model") {
@@ -911,13 +813,15 @@ const app = agent({ name: "agy-acp" })
       if (!EFFORTS.includes(value as Effort)) throw new Error(`Unknown effort ${value}`);
       session.effort = value as Effort;
     }
-    await writeState(state);
+    await sessions.set(session);
 
     return { configOptions: buildConfigOptions(session) };
   })
   .onRequest("session/close", async (ctx) => {
     const { sessionId } = ctx.params;
     activeToolCallsBySession.delete(sessionId);
+    closeNativeSession(sessionId, true);
+    mcpConfigs.release(sessionId);
     const child = activeProcesses[sessionId];
     if (child) {
       child.kill("SIGINT");
@@ -926,17 +830,54 @@ const app = agent({ name: "agy-acp" })
   })
   .onRequest("session/prompt", async (ctx) => {
     const { sessionId, prompt } = ctx.params;
-    const state = await readState();
-    const session = state.sessions[sessionId];
+    const session = await sessions.get(sessionId);
     if (!session) {
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    await syncSessionMcpConfig(session);
+    const geminiDir = await syncSessionMcpConfig(session);
 
     const userPrompt = serializePrompt(prompt);
+    // CLI-handled slash commands are unavailable in stream-input mode.
+    // Close the warm process so a one-shot command cannot diverge its context.
+    const cliCommand = userPrompt.trimStart().startsWith("/");
+    if (cliCommand) closeNativeSession(sessionId);
+    if (!cliCommand && await supportsPersistentInput()) {
+      const signature = JSON.stringify({ cwd: session.cwd, mcpServers: session.mcpServers,
+        args: buildAgyArgs({ ...session, conversationId: undefined }, "", { effectiveEffort, geminiDir }) });
+      let native = nativeSessions.get(sessionId);
+      if (native?.busy) throw new RequestError(-32603, "This AGY session already has an active turn.");
+      if (!native?.alive || native.signature !== signature) {
+        closeNativeSession(sessionId);
+        native = new NativeSession(spawnAgy([
+          ...buildAgyArgs(session, "", { effectiveEffort, geminiDir }), "--input-format", "stream-json",
+        ], { cwd: session.cwd, env: { ...process.env } }), signature);
+        nativeSessions.set(sessionId, native);
+      }
+      const turnContext: TurnContext = { hasOutputText: false, usage: new AgyTurnUsage() };
+      let turnError: string | undefined;
+      try {
+        await native.run(userPrompt, event => handleAgyEvent(event, ctx.client, session,
+          error => { turnError = error; }, turnContext));
+        if (turnError) { closeNativeSession(sessionId); throw new RequestError(-32603, turnError); }
+        const usage = turnContext.usage.snapshot();
+        const modelCallDurationMs = turnContext.usage.modelCallDurationMs();
+        return { stopReason: "end_turn", ...(usage ? { usage } : {}),
+          ...(modelCallDurationMs === undefined ? {} : { _meta: { metrics: { usageScope: "turn", modelCallDurationMs } } }) };
+      } catch (error) {
+        if (error instanceof NativeTurnCancelled) return { stopReason: "cancelled" };
+        closeNativeSession(sessionId);
+        throw error instanceof RequestError ? error : new RequestError(-32603, (error as Error).message);
+      } finally {
+        const latest = await sessions.get(sessionId);
+        if (latest && session.conversationId) {
+          latest.conversationId = session.conversationId;
+          await sessions.set(latest);
+        }
+      }
+    }
     const agyArgs = buildAgyArgs(session, userPrompt, {
-      effectiveEffort,
+      effectiveEffort, geminiDir,
     });
 
     return new Promise((resolve, reject) => {
@@ -946,9 +887,8 @@ const app = agent({ name: "agy-acp" })
       });
       activeProcesses[sessionId] = child;
 
-      const turn: PromptTurnResult = { stopReason: "end_turn" };
       let turnError: string | null = null;
-      const turnContext: TurnContext = { hasOutputText: false };
+      const turnContext: TurnContext = { hasOutputText: false, usage: new AgyTurnUsage() };
       let stderrOutput = "";
       // Accumulate raw bytes and split on newline boundaries. Splitting on the
       // data chunk boundary (chunk.toString("utf-8")) corrupts multi-byte
@@ -958,26 +898,25 @@ const app = agent({ name: "agy-acp" })
       // multi-byte sequence, so it is always safe to split on.
       let buffer = Buffer.alloc(0);
 
+      const consumeLine = (line: string) => {
+        if (!line.trim()) return;
+        try {
+          handleAgyEvent(
+            JSON.parse(line), ctx.client, session,
+            (err) => { turnError = err; }, turnContext,
+          );
+        } catch {
+          logDebug("raw output:", line);
+        }
+      };
+
       child.stdout.on("data", (chunk: Buffer) => {
         buffer = Buffer.concat([buffer, chunk]);
         let newlineIdx: number;
         while ((newlineIdx = buffer.indexOf(0x0a)) >= 0) {
           const line = buffer.subarray(0, newlineIdx).toString("utf-8");
           buffer = buffer.subarray(newlineIdx + 1);
-          if (!line.trim()) continue;
-          try {
-            handleAgyEvent(
-              JSON.parse(line),
-              ctx.client,
-              session,
-              (err) => {
-                turnError = err;
-              },
-              turnContext,
-            );
-          } catch {
-            logDebug("raw output:", line);
-          }
+          consumeLine(line);
         }
       });
 
@@ -1000,8 +939,13 @@ const app = agent({ name: "agy-acp" })
       });
 
       child.on("close", async (code) => {
+        if (buffer.length) consumeLine(buffer.toString("utf-8"));
         delete activeProcesses[sessionId];
-        await writeState(state);
+        const latest = await sessions.get(sessionId);
+        if (latest && session.conversationId) {
+          latest.conversationId = session.conversationId;
+          await sessions.set(latest);
+        }
 
         const wasKilled = child.killed || code === null;
         if (wasKilled) {
@@ -1012,13 +956,23 @@ const app = agent({ name: "agy-acp" })
           const detail = stderrOutput.trim() ? `: ${stderrOutput.trim()}` : "";
           reject(new RequestError(-32603, `Antigravity process exited with code ${code}${detail}`));
         } else {
-          resolve({ stopReason: turn.stopReason });
+          const usage = turnContext.usage.snapshot();
+          const modelCallDurationMs = turnContext.usage.modelCallDurationMs();
+          resolve({
+            stopReason: "end_turn",
+            ...(usage ? { usage } : {}),
+            ...(modelCallDurationMs !== undefined ? {
+              _meta: { metrics: { usageScope: "turn", modelCallDurationMs } },
+            } : {}),
+          });
         }
       });
     });
   })
   .onNotification("session/cancel", async (ctx) => {
     const { sessionId } = ctx.params;
+    closeNativeSession(sessionId, true);
+    mcpConfigs.release(sessionId);
     const child = activeProcesses[sessionId];
     if (child) {
       logDebug("Cancelling active process for session", sessionId);

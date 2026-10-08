@@ -122,3 +122,9 @@ test("buildAgyArgs injects cwd as --add-dir and deduplicates with additionalDire
   assert.deepEqual(addDirArgs, ["/workspace/my-app", "/workspace/docs"]);
 });
 
+
+test("buildAgyArgs explicitly selects the session Gemini root without changing the workspace", () => {
+  const args = buildAgyArgs({ cwd: "/work", modelBase: "model", effort: null, modeId: DEFAULT_MODE_ID, additionalDirectories: [] }, "prompt", { argv: [], env: {}, geminiDir: "/private/session" });
+  assert.equal(args[args.indexOf("--gemini_dir") + 1], "/private/session");
+  assert.equal(args[args.indexOf("--add-dir") + 1], "/work");
+});

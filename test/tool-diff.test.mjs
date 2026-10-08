@@ -7,7 +7,8 @@ import {
   buildToolCallDiffs,
   extractDiffBlock,
   readStepOutputText,
-  readTranscriptToolCallArgs
+  readTranscriptToolCallArgs,
+  resolveToolCallParameters
 } from "../dist/toolDiff.js";
 
 test("buildToolCallDiffs generates ACP diff for replace_file_content with parameters", () => {
@@ -175,4 +176,163 @@ test("buildToolCallDiffs returns empty array for non-edit tools or invalid param
   assert.deepEqual(buildToolCallDiffs("view_file", { TargetFile: "/path/to/file.ts" }), []);
   assert.deepEqual(buildToolCallDiffs("run_command", { CommandLine: "ls" }), []);
   assert.deepEqual(buildToolCallDiffs("replace_file_content", {}), []);
+});
+
+function withTranscripts(records, run) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-full-transcript-test-"));
+  const prevEnv = process.env.ANTIGRAVITY_APP_DATA_DIR;
+  process.env.ANTIGRAVITY_APP_DATA_DIR = tmpDir;
+  const logsDir = path.join(tmpDir, "brain", "test-conv", ".system_generated", "logs");
+  fs.mkdirSync(logsDir, { recursive: true });
+  try {
+    for (const [filename, lines] of Object.entries(records)) {
+      fs.writeFileSync(path.join(logsDir, filename), lines.map(line => typeof line === "string" ? line : JSON.stringify(line)).join("\n"));
+    }
+    return run();
+  } finally {
+    if (prevEnv === undefined) delete process.env.ANTIGRAVITY_APP_DATA_DIR;
+    else process.env.ANTIGRAVITY_APP_DATA_DIR = prevEnv;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+const call = (step, tool, args) => ({ step_index: step, tool_calls: [{ name: tool, args }] });
+const displayArgs = args => Object.fromEntries(Object.entries(args).map(([key, value]) => [key, JSON.stringify(value)]));
+const shortened = text => JSON.stringify(text).slice(0, 2048) + "\n<truncated 1127 bytes>";
+
+test("full transcript recovers long Unicode Markdown and preserves literal escapes", () => {
+  const content = '# 任务列表\n\n- [ ] 检查权限\\n保留字面转义\n'.repeat(150);
+  const args = { TargetFile: "/tmp/task.md", CodeContent: content, Overwrite: true };
+  withTranscripts({
+    "transcript.jsonl": [call(3, "write_to_file", { ...displayArgs(args), CodeContent: shortened(content) })],
+    "transcript_full.jsonl": [call(3, "write_to_file", args)]
+  }, () => {
+    assert.deepEqual(readTranscriptToolCallArgs("test-conv", "write_to_file", 4), args);
+    const resolved = resolveToolCallParameters("test-conv", "write_to_file", 4, { TargetFile: args.TargetFile });
+    assert.equal(buildToolCallDiffs("write_to_file", resolved)[0].newText, content);
+    assert.equal(resolved.Overwrite, true);
+  });
+});
+
+test("full transcript arguments are already decoded, including JSON document contents", () => {
+  for (const content of ['"literal string"', '["one", "two"]', '{"path":"C:\\\\repo"}', 'true', '123', '']) {
+    const args = { TargetFile: "/tmp/data.json", CodeContent: content };
+    withTranscripts({ "transcript_full.jsonl": [call(2, "write_to_file", args)] }, () => {
+      assert.deepEqual(readTranscriptToolCallArgs("test-conv", "write_to_file", 3), args);
+    });
+  }
+});
+
+test("display-only fallback decodes scalar arguments and skips malformed trailing writes", () => {
+  const args = { TargetFile: "/tmp/task.md", CodeContent: "# Task\n", Overwrite: true, StartLine: 3 };
+  withTranscripts({
+    "transcript.jsonl": [call(2, "write_to_file", displayArgs(args)), '{"step_index":4,'],
+    "transcript_full.jsonl": ['{"step_index":2,']
+  }, () => assert.deepEqual(readTranscriptToolCallArgs("test-conv", "write_to_file", 3), args));
+});
+
+test("a lagging full transcript cannot replace a newer call with stale content", () => {
+  const oldArgs = { TargetFile: "/tmp/task.md", CodeContent: "old" };
+  const newArgs = { ...oldArgs, CodeContent: "new" };
+  withTranscripts({
+    "transcript_full.jsonl": [call(2, "write_to_file", oldArgs)],
+    "transcript.jsonl": [call(2, "write_to_file", displayArgs(oldArgs)), call(5, "write_to_file", displayArgs(newArgs))]
+  }, () => {
+    assert.deepEqual(readTranscriptToolCallArgs("test-conv", "write_to_file", 6), newArgs);
+    assert.deepEqual(readTranscriptToolCallArgs("test-conv", "write_to_file", 3), oldArgs);
+  });
+});
+
+test("same-name calls are disambiguated by the stream target path", () => {
+  const a = { TargetFile: "/tmp/a.md", CodeContent: "A" };
+  const b = { TargetFile: "/tmp/b.md", CodeContent: "B" };
+  withTranscripts({
+    "transcript_full.jsonl": [{ step_index: 2, tool_calls: [
+      { name: "write_to_file", args: a }, { name: "write_to_file", args: b }
+    ] }]
+  }, () => {
+    assert.equal(readTranscriptToolCallArgs("test-conv", "write_to_file", 3), null);
+    assert.deepEqual(resolveToolCallParameters("test-conv", "write_to_file", 3, { TargetFile: b.TargetFile }), b);
+  });
+});
+
+test("a path mismatch in the latest call never reuses an earlier edit", () => {
+  const a = { TargetFile: "/tmp/a.md", CodeContent: "old A" };
+  const b = { TargetFile: "/tmp/b.md", CodeContent: "current B" };
+  withTranscripts({
+    "transcript_full.jsonl": [call(2, "write_to_file", a)],
+    "transcript.jsonl": [call(2, "write_to_file", displayArgs(a)), call(5, "write_to_file", displayArgs(b))]
+  }, () => assert.equal(readTranscriptToolCallArgs("test-conv", "write_to_file", 6, a.TargetFile), null));
+});
+
+test("both lagging logs cannot supply a previous same-path edit", () => {
+  const args = { TargetFile: "/tmp/task.md", CodeContent: "previous edit" };
+  withTranscripts({ "transcript_full.jsonl": [call(2, "write_to_file", args)] }, () => {
+    assert.equal(resolveToolCallParameters("test-conv", "write_to_file", 9, { TargetFile: args.TargetFile }).CodeContent, undefined);
+  });
+});
+
+test("a gapped tool step requires its own output record and the latest planner batch", () => {
+  const args = { TargetFile: "/tmp/task.md", CodeContent: "correct" };
+  withTranscripts({ "transcript_full.jsonl": [call(2, "write_to_file", args), { step_index: 4, type: "GENERIC" }] }, () => {
+    assert.deepEqual(resolveToolCallParameters("test-conv", "write_to_file", 4, { TargetFile: args.TargetFile }), args);
+  });
+  withTranscripts({ "transcript_full.jsonl": [call(2, "write_to_file", args), call(3, "view_file", { TargetFile: args.TargetFile }), { step_index: 4, type: "GENERIC" }] }, () => {
+    assert.equal(resolveToolCallParameters("test-conv", "write_to_file", 4, { TargetFile: args.TargetFile }).CodeContent, undefined);
+  });
+});
+
+test("tail reader preserves Unicode records spanning multiple read chunks", () => {
+  const args = { TargetFile: "/tmp/task.md", CodeContent: "中文🙂\\n\n".repeat(45000) };
+  withTranscripts({ "transcript_full.jsonl": [call(1, "view_file", {}), call(2, "write_to_file", args), '{"step_index":4,'] }, () => {
+    assert.deepEqual(readTranscriptToolCallArgs("test-conv", "write_to_file", 3), args);
+  });
+});
+
+test("missing and truncated stream fields are recovered without replacing complete stream values", () => {
+  const args = { TargetFile: "/tmp/task.md", TargetContent: "old\n", ReplacementContent: "new\n" };
+  withTranscripts({ "transcript_full.jsonl": [call(2, "replace_file_content", args)] }, () => {
+    assert.deepEqual(resolveToolCallParameters("test-conv", "replace_file_content", 3, {
+      ...args, ReplacementContent: shortened("new\n")
+    }), args);
+    assert.deepEqual(resolveToolCallParameters("test-conv", "replace_file_content", 3, {
+      TargetFile: args.TargetFile, TargetContent: "stream old\n"
+    }), { ...args, TargetContent: "stream old\n" });
+    const complete = { ...args, ReplacementContent: "" };
+    assert.equal(resolveToolCallParameters("test-conv", "replace_file_content", 3, complete), complete);
+    assert.deepEqual(resolveToolCallParameters("test-conv", "replace_file_content", 3, { TargetContent: "old\n", ReplacementContent: "new\n" }), args);
+  });
+});
+
+test("full transcript recovers structured multi-replacements from shortened display arrays", () => {
+  const args = { TargetFile: "/tmp/task.md", Replacements: [
+    { TargetContent: "old", ReplacementContent: "new\n".repeat(2000) },
+    { TargetContent: "remove", ReplacementContent: "" }
+  ] };
+  withTranscripts({
+    "transcript.jsonl": [call(2, "multi_replace_file_content", { ...displayArgs(args), Replacements: shortened(args.Replacements) })],
+    "transcript_full.jsonl": [call(2, "multi_replace_file_content", args)]
+  }, () => {
+    const recovered = resolveToolCallParameters("test-conv", "multi_replace_file_content", 3, { TargetFile: args.TargetFile });
+    assert.equal(buildToolCallDiffs("multi_replace_file_content", recovered)[0].newText, args.Replacements[0].ReplacementContent);
+    assert.equal(buildToolCallDiffs("multi_replace_file_content", recovered)[1].newText, "");
+  });
+});
+
+test("complete output patch takes precedence over unrecoverable shortened arguments", () => {
+  const output = "[diff_block_start]\n@@ -1 +1 @@\n-old\n+new\n[diff_block_end]";
+  for (const [tool, params] of [
+    ["replace_file_content", { TargetContent: shortened("old"), ReplacementContent: "new" }],
+    ["write_to_file", { CodeContent: shortened("new") }],
+    ["multi_replace_file_content", { Replacements: shortened([]) }]
+  ]) {
+    assert.deepEqual(buildToolCallDiffs(tool, { TargetFile: "/tmp/task.md", ...params }, output), [{
+      type: "diff", path: "/tmp/task.md", patch: "@@ -1 +1 @@\n-old\n+new"
+    }]);
+  }
+  const diff = buildToolCallDiffs("write_to_file", {
+    TargetFile: "/tmp/task.md", CodeContent: "new", Description: shortened("description")
+  }, output)[0];
+  assert.equal(diff.oldText, null);
+  assert.equal(diff.newText, "new");
 });

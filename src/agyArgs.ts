@@ -17,6 +17,7 @@ export interface SessionArgsState {
 }
 
 export interface BuildAgyArgsOptions {
+  geminiDir?: string;
   argv?: string[];
   env?: NodeJS.ProcessEnv;
   effectiveEffort?: (session: SessionArgsState) => Effort | null;
@@ -61,6 +62,7 @@ export function buildAgyArgs(
   const env = options.env ?? process.env;
 
   const args: string[] = ["--print", userPrompt, "--output-format", "stream-json"];
+  if (options.geminiDir) args.push("--gemini_dir", options.geminiDir);
 
   const printTimeout = resolvePrintTimeout(argv, env);
   if (printTimeout) {
