@@ -38,60 +38,126 @@ export function readStepOutputText(conversationId: string, stepIndex: number): s
 
 function parseAgyArgValue(val: unknown): unknown {
   if (typeof val === "string") {
-    const trimmed = val.trim();
-    if (
-      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-      (trimmed.startsWith("[") && trimmed.endsWith("]"))
-    ) {
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        return val;
-      }
+    try {
+      return JSON.parse(val);
+    } catch {
+      // A display transcript can contain an incomplete JSON value followed by
+      // <truncated N bytes>. Never attempt to unescape that incomplete value.
+      return val;
     }
   }
   return val;
+}
+
+/** Read recent records without rereading/copying the entire conversation log. */
+function* transcriptLines(file: string): Generator<string> {
+  const fd = fs.openSync(file, "r");
+  try {
+    let end = fs.fstatSync(fd).size;
+    let carry = Buffer.alloc(0);
+    while (end > 0) {
+      const length = Math.min(end, 64 * 1024);
+      end -= length;
+      const chunk = Buffer.alloc(length);
+      if (fs.readSync(fd, chunk, 0, length, end) !== length) throw new Error("Transcript changed during read");
+      const data = Buffer.concat([chunk, carry]);
+      const first = end > 0 ? data.indexOf(10) : -1;
+      if (end > 0 && first < 0) {
+        if (data.length > 16 * 1024 * 1024) throw new Error("Transcript record exceeds read limit");
+        carry = data;
+        continue;
+      }
+      const lines = data.subarray(first + 1).toString("utf8").split("\n");
+      carry = end > 0 ? data.subarray(0, first) : Buffer.alloc(0);
+      for (let i = lines.length - 1; i >= 0; i--) if (lines[i].trim()) yield lines[i];
+    }
+  } finally { fs.closeSync(fd); }
 }
 
 export function readTranscriptToolCallArgs(
   conversationId: string,
   toolName: string,
   stepIndex?: number,
+  targetFile?: string,
 ): Record<string, unknown> | null {
-  try {
-    const brainDir = getAgyBrainDir(conversationId);
-    const transcriptFile = path.join(brainDir, ".system_generated", "logs", "transcript.jsonl");
-    if (!fs.existsSync(transcriptFile)) return null;
-
-    const content = fs.readFileSync(transcriptFile, "utf-8");
-    const lines = content.trim().split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      try {
-        const obj = JSON.parse(line);
-        if (stepIndex !== undefined && typeof obj.step_index === "number" && obj.step_index > stepIndex) {
-          continue;
+  const logsDir = path.join(getAgyBrainDir(conversationId), ".system_generated", "logs");
+  let selected: { step: number; args?: Record<string, unknown> } | undefined;
+  let observedToolStep = false;
+  // The full transcript contains native JSON values. The display transcript
+  // JSON-encodes each argument again and truncates it at about 2 KiB.
+  for (const filename of ["transcript_full.jsonl", "transcript.jsonl"]) {
+    try {
+      for (const line of transcriptLines(path.join(logsDir, filename))) {
+        try {
+          const obj = JSON.parse(line);
+          const step = typeof obj.step_index === "number" ? obj.step_index : -1;
+          if (stepIndex !== undefined && step > stepIndex) continue;
+          if (step === stepIndex && ["GENERIC", "CODE_ACTION"].includes(obj.type)) observedToolStep = true;
+          if (!Array.isArray(obj.tool_calls) || !obj.tool_calls.length) continue;
+          const calls = obj.tool_calls.filter((tc: any) => tc?.name === toolName);
+          const matches = calls.filter((tc: any) => tc.args && typeof tc.args === "object" && !Array.isArray(tc.args))
+            .map((tc: any) => filename === "transcript_full.jsonl" ? tc.args as Record<string, unknown> : Object.fromEntries(
+              Object.entries(tc.args).map(([key, value]) => [key, parseAgyArgValue(value)])
+            ))
+            .filter((args: Record<string, unknown>) => !targetFile || toolFilePath(args) === targetFile);
+          // A missing/ambiguous path in the latest batch must not make us fall
+          // back to an older edit of the same file.
+          if (!selected || step > selected.step) selected = { step, args: matches.length === 1 ? matches[0] : undefined };
+          break;
+        } catch {
+          // A native process may still be writing the last JSONL record.
         }
-        if (Array.isArray(obj.tool_calls)) {
-          const match = obj.tool_calls.find((tc: any) => tc?.name === toolName);
-          if (match?.args && typeof match.args === "object") {
-            const parsedArgs: Record<string, unknown> = {};
-            for (const [k, v] of Object.entries(match.args)) {
-              parsedArgs[k] = parseAgyArgValue(v);
-            }
-            return parsedArgs;
-          }
-        }
-      } catch {
-        // ignore malformed line
       }
+    } catch {
+      // Older CLI versions may not produce the full transcript.
     }
-  } catch {
-    // ignore
   }
-  return null;
+  // A planner normally immediately precedes its tool step. For gaps, require
+  // the current tool record as evidence; otherwise both logs may be stale.
+  if (selected && stepIndex !== undefined && selected.step < stepIndex - 1 && !observedToolStep) return null;
+  return selected?.args ?? null;
+}
+
+function toolFilePath(p: Record<string, unknown>): unknown {
+  return p.TargetFile ?? p.targetFile ?? p.Path ?? p.path ?? p.FilePath ?? p.filePath;
+}
+
+function hasTruncatedArg(value: unknown): boolean {
+  if (typeof value === "string") return /(?:^|\r?\n)<truncated \d+ (?:bytes|lines)>\s*$/.test(value);
+  if (Array.isArray(value)) return value.some(hasTruncatedArg);
+  if (value && typeof value === "object") return Object.values(value).some(hasTruncatedArg);
+  return false;
+}
+
+export function resolveToolCallParameters(
+  conversationId: string,
+  toolName: string,
+  stepIndex: number,
+  parameters: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!["write_to_file", "replace_file_content", "multi_replace_file_content"].includes(toolName)) return parameters;
+  const p = parameters ?? {};
+  const text = (value: unknown) => typeof value === "string" && !hasTruncatedArg(value);
+  const replacements = p.Replacements ?? p.replacements;
+  const complete = toolName === "write_to_file"
+    ? text(p.CodeContent ?? p.codeContent ?? p.content)
+    : toolName === "replace_file_content"
+      ? text(p.TargetContent ?? p.targetContent) && text(p.ReplacementContent ?? p.replacementContent)
+      : Array.isArray(replacements) && replacements.length > 0 && replacements.every(rep =>
+        rep && text(rep.TargetContent) && text(rep.ReplacementContent));
+  const file = toolFilePath(p);
+  if (complete && typeof file === "string" && file) return parameters;
+  const recorded = readTranscriptToolCallArgs(conversationId, toolName, stepIndex, typeof file === "string" ? file : undefined);
+  if (!recorded) return parameters;
+  // Keep complete stream parameters; fill missing/truncated fields from the
+  // matching transcript call, rather than letting a shortened stream win.
+  const merged = { ...recorded };
+  for (const [key, value] of Object.entries(p)) {
+    if (value !== undefined && value !== null && (!hasTruncatedArg(value) || merged[key] === undefined)) {
+      merged[key] = value;
+    }
+  }
+  return merged;
 }
 
 /**
@@ -104,12 +170,17 @@ export function buildToolCallDiffs(
 ): AcpToolDiff[] {
   if (!parameters || typeof parameters !== "object") return [];
   const p = parameters as Record<string, unknown>;
-  const filePath =
-    p.TargetFile ?? p.targetFile ?? p.Path ?? p.path ?? p.FilePath ?? p.filePath;
+  const filePath = toolFilePath(p);
   if (typeof filePath !== "string" || !filePath) return [];
 
   const diffs: AcpToolDiff[] = [];
   const patch = outputText ? extractDiffBlock(outputText) : null;
+  const useSnippets = !patch || !hasTruncatedArg([
+    p.TargetContent ?? p.targetContent,
+    p.ReplacementContent ?? p.replacementContent,
+    p.CodeContent ?? p.codeContent ?? p.content,
+    p.Replacements ?? p.replacements,
+  ]);
 
   if (toolName === "replace_file_content") {
     const targetContent = p.TargetContent ?? p.targetContent;
@@ -122,8 +193,8 @@ export function buildToolCallDiffs(
         type: "diff",
         path: filePath,
         ...(patch ? { patch } : {}),
-        ...(hasTarget ? { oldText: targetContent } : {}),
-        ...(hasReplacement ? { newText: replacementContent } : {}),
+        ...(hasTarget && useSnippets ? { oldText: targetContent } : {}),
+        ...(hasReplacement && useSnippets ? { newText: replacementContent } : {}),
       });
     }
   } else if (toolName === "write_to_file") {
@@ -137,13 +208,13 @@ export function buildToolCallDiffs(
         type: "diff",
         path: filePath,
         ...(patch ? { patch } : {}),
-        oldText: isOverwrite ? "" : null,
-        ...(hasCode ? { newText: codeContent } : {}),
+        ...(useSnippets ? { oldText: isOverwrite ? "" : null } : {}),
+        ...(hasCode && useSnippets ? { newText: codeContent } : {}),
       });
     }
   } else if (toolName === "multi_replace_file_content") {
     const replacements = p.Replacements ?? p.replacements;
-    if (Array.isArray(replacements) && replacements.length > 0) {
+    if (useSnippets && Array.isArray(replacements) && replacements.length > 0) {
       for (const rep of replacements) {
         if (typeof rep?.TargetContent === "string" && typeof rep?.ReplacementContent === "string") {
           diffs.push({

@@ -62,8 +62,12 @@ npx agy-acp-bridge
 - **Cancellation**: Gracefully handles `session/cancel` by terminating active sub-processes using `SIGINT`.
 - **Clean Output Channel**: Routes all internal logging and CLI stderr to `stderr` to avoid polluting the JSON-RPC pipe.
 - **Pass-through Configuration**: Forwards command-line flags (like `--dangerously-skip-permissions` or `--sandbox`) to child processes.
+- **Bounded File Diffs**: Recover full typed edit arguments from native transcripts. Large diffs use negotiated same-host artifacts with FreeBuddy; ACP notifications stay within 64 KiB, with explicit incomplete notices for unsupported clients or oversized artifacts.
 
 ## Development
+
+File-diff capture and the native transcript truncation investigation are documented
+in [docs/diff-transcript.md](docs/diff-transcript.md).
 
 1. Install dependencies:
    ```bash

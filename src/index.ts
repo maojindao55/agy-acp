@@ -23,6 +23,7 @@ import { NativeSession, NativeTurnCancelled } from "./nativeSession.js";
 import { cachedModels } from "./modelCache.js";
 import { SessionStore } from "./sessionStore.js";
 import { SessionMcpConfigs } from "./sessionMcpConfig.js";
+import { BoundedUpdates } from "./boundedUpdates.js";
 import {
   EFFORTS,
   type Effort,
@@ -36,7 +37,7 @@ import {
 import {
   buildToolCallDiffs,
   readStepOutputText,
-  readTranscriptToolCallArgs,
+  resolveToolCallParameters,
 } from "./toolDiff.js";
 export {
   buildToolCallDiffs,
@@ -296,6 +297,7 @@ function migrateSession(raw: any): SessionState {
 
 const sessions = new SessionStore<SessionState>(os.homedir(), migrateSession);
 const mcpConfigs = new SessionMcpConfigs();
+const boundedUpdates = new BoundedUpdates();
 
 function sanitizeCwd(cwd: string | undefined): string {
   if (!cwd || cwd === "/" || cwd === ".") return os.homedir();
@@ -332,6 +334,7 @@ function closeAllNativeSessions(): void {
   for (const sessionId of nativeSessions.keys()) closeNativeSession(sessionId, true);
   for (const child of Object.values(activeProcesses)) child.kill("SIGTERM");
   mcpConfigs.dispose();
+  boundedUpdates.dispose();
 }
 process.stdin.once("end", closeAllNativeSessions);
 process.once("exit", closeAllNativeSessions);
@@ -463,7 +466,9 @@ function getSessionToolCalls(sessionId: string): Map<string, { toolName?: string
 // --- agy event handling ----------------------------------------------------
 
 function emit(client: AgentContext, sessionId: string, update: SessionUpdate): void {
-  void client.notify("session/update", { sessionId, update });
+  for (const bounded of boundedUpdates.prepare(sessionId, update)) {
+    void client.notify("session/update", { sessionId, update: bounded });
+  }
 }
 
 function emitUsage(client: AgentContext, sessionId: string, usage: any, modelBase: string): void {
@@ -606,16 +611,7 @@ function handleAgyEvent(
             outputText = diskOutput;
           }
         }
-        const hasSnippet =
-          effectiveParams?.TargetContent ||
-          effectiveParams?.CodeContent ||
-          effectiveParams?.Replacements;
-        if (!hasSnippet) {
-          const transcriptArgs = readTranscriptToolCallArgs(convId, effectiveToolName, step.step_index);
-          if (transcriptArgs) {
-            effectiveParams = { ...transcriptArgs, ...effectiveParams };
-          }
-        }
+        effectiveParams = resolveToolCallParameters(convId, effectiveToolName, step.step_index, effectiveParams);
       }
 
       const contentItems: any[] = [];
@@ -648,7 +644,8 @@ function handleAgyEvent(
 // --- ACP agent -------------------------------------------------------------
 
 const app = agent({ name: "agy-acp" })
-  .onRequest("initialize", async () => {
+  .onRequest("initialize", async (ctx) => {
+    boundedUpdates.localDiffFiles = (ctx.params.clientCapabilities?._meta?.freebuddy as { localDiffFiles?: unknown } | undefined)?.localDiffFiles === 1;
     return {
       protocolVersion: PROTOCOL_VERSION,
       _meta: { freebuddy: { persistentSession: await supportsPersistentInput() } },
