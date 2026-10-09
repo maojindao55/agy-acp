@@ -56,6 +56,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   record('prompt'); ++turn;
   if(turn === 1) emit({event:'init',conversation_id:'native-warm'});
   if(input.message.content === 'crash') process.exit(7);
+  emit({event:'step_update',step_update:{step_type:'agent_response',step_index:turn*2-1,state:'ACTIVE',thinking_delta:'Thought '+turn}});
   emit({event:'step_update',step_update:{step_type:'agent_response',step_index:turn*2-1,state:'ACTIVE',text_delta:'Reply'}});
   if(input.message.content === 'hold') return;
   const usage = {input_tokens:100,output_tokens:turn*10,total_tokens:100+turn*10,thinking_tokens:turn,cache_read_tokens:0};
@@ -68,23 +69,36 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const runBridge = async action => {
     const child = spawn(process.execPath, ["--import", preload, "dist/index.js"], { cwd: process.cwd(), env: { ...process.env, AGY_ACP_COMMAND: mock } });
     let stderr = ""; child.stderr.on("data", d => { stderr += d; });
+    let output = "";
+    const updates = [];
+    child.stdout.on("data", chunk => {
+      output += chunk;
+      let newline;
+      while ((newline = output.indexOf("\n")) >= 0) {
+        const message = JSON.parse(output.slice(0, newline));
+        output = output.slice(newline + 1);
+        if (message.params?.update) updates.push(message.params.update);
+      }
+    });
     try {
       await client({ name: "warm-test", version: "1" }).connectWith(ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)), async ctx => {
         const init = await ctx.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
         assert.equal(init._meta.freebuddy.persistentSession, true);
-        await action(ctx);
+        await action(ctx, updates);
       });
     } catch (error) { error.message += `\n${stderr}`; throw error; }
     finally { const exited = once(child, "close"); child.stdin.end(); child.kill(); await exited; }
   };
   let id;
-  await runBridge(async ctx => {
+  await runBridge(async (ctx, updates) => {
     const created = await ctx.request("session/new", { cwd: root, mcpServers: [] }); id = created.sessionId;
     const prompt = text => ctx.request("session/prompt", { sessionId: id, prompt: [{ type: "text", text }] });
     const first = await prompt("one"), second = await prompt("two");
     assert.equal(first.usage.outputTokens, 10); assert.equal(second.usage.outputTokens, 20);
     assert.equal(second.usage.thoughtTokens, 2);
     assert.equal(second._meta.metrics.modelCallDurationMs, 4000);
+    assert.deepEqual(updates.filter(update => update.sessionUpdate === "agent_thought_chunk")
+      .map(update => [update.content.text, update.messageId]), [["Thought 1", "thought-1"], ["Thought 2", "thought-3"]]);
     assert.equal((await records()).filter(r => r.event === "spawn").length, 1);
     assert.equal((await prompt("/help")).stopReason, "end_turn");
     assert.equal((await records()).filter(r => r.event === "oneshot").length, 1);

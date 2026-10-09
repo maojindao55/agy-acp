@@ -546,9 +546,18 @@ function handleAgyEvent(
   const step = eventData.step_update;
   if (!step) return;
   turnContext?.usage.observeStep(step);
-  const { step_type, state, text_delta, tool_name, tool_info } = step;
+  const { step_type, state, text_delta, thinking_delta, tool_name, tool_info } = step;
 
   if (step_type === "agent_response") {
+    // Forward only an actual native thought delta. ACTIVE alone can mean that
+    // a model request has started; it is not evidence of generated output.
+    if (typeof thinking_delta === "string" && thinking_delta.length) {
+      emit(client, session.sessionId, {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: thinking_delta },
+        messageId: `thought-${step.step_index}`,
+      });
+    }
     if (text_delta) {
       if (turnContext) {
         turnContext.hasOutputText = true;

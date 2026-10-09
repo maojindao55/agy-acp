@@ -162,6 +162,13 @@ syncBuiltinESMExports();\n`);
       { event: "result", result: { status: "SUCCESS", usage: nativeUsage(900, 50) } },
     ],
     unterminated: [event({ ...response(9, nativeUsage(500, 9)), text_delta: "Last line" })],
+    thinking: [
+      event(response(11, undefined, "ACTIVE")), // Request activity is not output.
+      event({ ...response(11, undefined, "ACTIVE"), thinking_delta: "先思考🙂" }),
+      event({ ...response(11, undefined, "ACTIVE"), thinking_delta: "再回答" }),
+      event({ ...response(11, nativeUsage(500, 9, { thinking_tokens: 7 })), text_delta: "Answer", duration_seconds: 1 }),
+      { event: "result", result: { status: "SUCCESS" } },
+    ],
   };
   await fs.writeFile(mockAgy, `#!${process.execPath}
 if (process.argv.includes('models')) { console.log('[]'); process.exit(0); }
@@ -208,9 +215,20 @@ process.stdout.write(fixtures[name].map(event => JSON.stringify(event)).join('\\
         });
         assert.equal((await prompt("missing")).usage, undefined);
         assert.equal((await prompt("unterminated")).usage.outputTokens, 9);
+        const beforeThinking = messages.length;
+        const thinkingResult = await prompt("thinking");
+        assert.equal(thinkingResult.usage.thoughtTokens, 7);
+        assert.equal(thinkingResult._meta.metrics.modelCallDurationMs, 1_000);
+        const output = messages.slice(beforeThinking).map(message => message.params?.update)
+          .filter(update => ["agent_thought_chunk", "agent_message_chunk"].includes(update?.sessionUpdate));
+        assert.deepEqual(output.map(update => [update.sessionUpdate, update.content.text, update.messageId]), [
+          ["agent_thought_chunk", "先思考🙂", "thought-11"],
+          ["agent_thought_chunk", "再回答", "thought-11"],
+          ["agent_message_chunk", "Answer", "msg-11"],
+        ]);
         const occupancy = messages.filter(message => message.params?.update?.sessionUpdate === "usage_update")
           .map(message => message.params.update.used);
-        assert.deepEqual(occupancy, [100, 100, 200, 400, 500]);
+        assert.deepEqual(occupancy, [100, 100, 200, 400, 500, 500]);
       } finally {
         session.dispose();
       }
