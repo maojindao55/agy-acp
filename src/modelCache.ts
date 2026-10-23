@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 export async function cachedModels<T>(options: {
   file: string; executable: string; valid: (value: unknown) => value is T[];
   fetch: () => Promise<T[] | null>; fallback: T[]; now?: () => number; ttlMs?: number;
+  onRefresh?: (models: T[]) => void;
 }): Promise<T[]> {
   const now = options.now ?? Date.now;
   let fingerprint: string;
@@ -21,6 +22,7 @@ export async function cachedModels<T>(options: {
       await fs.mkdir(path.dirname(options.file), { recursive: true });
       await fs.writeFile(temp, JSON.stringify({ version: 1, fingerprint, fetchedAt: now(), models }), { mode: 0o600 });
       await fs.rename(temp, options.file);
+      options.onRefresh?.(models);
     } catch { /* A read-only cache must not prevent running the CLI. */ }
     finally { await fs.rm(temp, { force: true }).catch(() => {}); }
     return models;
@@ -29,7 +31,7 @@ export async function cachedModels<T>(options: {
     const cache = JSON.parse(await fs.readFile(options.file, "utf8"));
     if (cache.version === 1 && cache.fingerprint === fingerprint && Number.isFinite(cache.fetchedAt) &&
         cache.fetchedAt <= now() && options.valid(cache.models)) {
-      if (now() - cache.fetchedAt > (options.ttlMs ?? 24 * 60 * 60_000)) void refresh().catch(() => {});
+      if (now() - cache.fetchedAt > (options.ttlMs ?? 15 * 60_000)) void refresh().catch(() => {});
       return cache.models;
     }
   } catch { /* Cold or invalid cache. */ }

@@ -98,17 +98,23 @@ interface ModelDef {
 }
 
 const FALLBACK_MODELS: ModelDef[] = [
+  { base: "gemini-4-argon", name: "Gemini 4 Argon", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
+  { base: "gemini-3.8-flash", name: "Gemini 3.8 Flash", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
+  { base: "claude-opus-5-5", name: "Claude Opus 5.5", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
+  { base: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
+  { base: "gpt-oss-120b", name: "GPT-OSS 120B", contextWindow: 128_000, supportsEffort: true, defaultEffort: "medium" },
   { base: "gemini-3.7-flash", name: "Gemini 3.7 Flash", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
   { base: "gemini-3.6-flash", name: "Gemini 3.6 Flash", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
   { base: "gemini-3.5-flash", name: "Gemini 3.5 Flash", contextWindow: 1_000_000, supportsEffort: true, defaultEffort: "high" },
   { base: "gemini-3.1-pro", name: "Gemini 3.1 Pro", contextWindow: 2_000_000, supportsEffort: true, defaultEffort: "high" },
-  { base: "gpt-oss-120b", name: "GPT-OSS 120B", contextWindow: 128_000, supportsEffort: true, defaultEffort: "medium" },
   { base: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", contextWindow: 200_000, supportsEffort: false, defaultEffort: null },
   { base: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", contextWindow: 200_000, supportsEffort: false, defaultEffort: null },
 ];
 
 let dynamicModels: ModelDef[] = [...FALLBACK_MODELS];
 let modelsFetchPromise: Promise<ModelDef[]> | null = null;
+let lastModelsFetchTime = 0;
+const MODELS_CACHE_TTL_MS = 15 * 60_000;
 
 function fetchAgyModels(): Promise<ModelDef[] | null> {
   return new Promise((resolve) => {
@@ -171,14 +177,33 @@ function fetchAgyModels(): Promise<ModelDef[] | null> {
 }
 
 async function getAvailableModels(): Promise<ModelDef[]> {
-  if (!modelsFetchPromise) {
+  const now = Date.now();
+  if (!modelsFetchPromise || now - lastModelsFetchTime > MODELS_CACHE_TTL_MS) {
+    lastModelsFetchTime = now;
     modelsFetchPromise = cachedModels<ModelDef>({
-      file: path.join(os.homedir(), ".agy-acp-models.json"), executable: AGY_EXECUTABLE,
-      fallback: dynamicModels, fetch: fetchAgyModels,
-      valid: (value): value is ModelDef[] => Array.isArray(value) && value.length > 0 && value.every(m =>
-        m && typeof m.base === "string" && typeof m.name === "string" && Number.isFinite(m.contextWindow) &&
-        m.contextWindow > 0 && typeof m.supportsEffort === "boolean" &&
-        (m.defaultEffort === null || EFFORTS.includes(m.defaultEffort))),
+      file: path.join(os.homedir(), ".agy-acp-models.json"),
+      executable: AGY_EXECUTABLE,
+      fallback: dynamicModels,
+      fetch: fetchAgyModels,
+      ttlMs: MODELS_CACHE_TTL_MS,
+      onRefresh: (models) => {
+        if (models && models.length > 0) {
+          dynamicModels = models;
+        }
+      },
+      valid: (value): value is ModelDef[] =>
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.every(
+          (m) =>
+            m &&
+            typeof m.base === "string" &&
+            typeof m.name === "string" &&
+            Number.isFinite(m.contextWindow) &&
+            m.contextWindow > 0 &&
+            typeof m.supportsEffort === "boolean" &&
+            (m.defaultEffort === null || EFFORTS.includes(m.defaultEffort))
+        ),
     })
       .then((models) => {
         if (models && models.length > 0) {
@@ -194,7 +219,7 @@ async function getAvailableModels(): Promise<ModelDef[]> {
 // Start discovery immediately in background
 void getAvailableModels();
 
-const DEFAULT_MODEL_BASE = "gemini-3.7-flash";
+const DEFAULT_MODEL_BASE = "gemini-4-argon";
 
 function findModel(base: string): ModelDef | undefined {
   return dynamicModels.find((m) => m.base === base);
@@ -211,6 +236,18 @@ function contextWindowFor(base: string): number {
 // state and accept old model ids from clients that may have persisted them.
 
 const LEGACY_MODEL_MAP: Record<string, { base: string; effort: Effort | null }> = {
+  "Gemini 4 Argon (High)": { base: "gemini-4-argon", effort: "high" },
+  "Gemini 4 Argon (Medium)": { base: "gemini-4-argon", effort: "medium" },
+  "Gemini 4 Argon (Low)": { base: "gemini-4-argon", effort: "low" },
+  "Gemini 3.8 Flash (High)": { base: "gemini-3.8-flash", effort: "high" },
+  "Gemini 3.8 Flash (Medium)": { base: "gemini-3.8-flash", effort: "medium" },
+  "Gemini 3.8 Flash (Low)": { base: "gemini-3.8-flash", effort: "low" },
+  "Claude Opus 5.5 (High)": { base: "claude-opus-5-5", effort: "high" },
+  "Claude Opus 5.5 (Medium)": { base: "claude-opus-5-5", effort: "medium" },
+  "Claude Opus 5.5 (Low)": { base: "claude-opus-5-5", effort: "low" },
+  "Claude Sonnet 5.5 (High)": { base: "claude-sonnet-5-5", effort: "high" },
+  "Claude Sonnet 5.5 (Medium)": { base: "claude-sonnet-5-5", effort: "medium" },
+  "Claude Sonnet 5.5 (Low)": { base: "claude-sonnet-5-5", effort: "low" },
   "Gemini 3.7 Flash (High)": { base: "gemini-3.7-flash", effort: "high" },
   "Gemini 3.7 Flash (Medium)": { base: "gemini-3.7-flash", effort: "medium" },
   "Gemini 3.7 Flash (Low)": { base: "gemini-3.7-flash", effort: "low" },
@@ -338,7 +375,7 @@ function closeAllNativeSessions(): void {
 }
 process.stdin.once("end", closeAllNativeSessions);
 process.once("exit", closeAllNativeSessions);
-for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => {
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.once(signal, () => {
   closeAllNativeSessions();
   process.exit(0);
 });
@@ -347,7 +384,9 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => 
 // --- Config options --------------------------------------------------------
 
 function effectiveEffort(session: { modelBase: string; effort: Effort | null }): Effort | null {
-  return session.effort ?? findModel(session.modelBase)?.defaultEffort ?? null;
+  const model = findModel(session.modelBase);
+  if (model && !model.supportsEffort) return null;
+  return session.effort ?? model?.defaultEffort ?? null;
 }
 
 function buildConfigOptions(session: SessionState): SessionConfigOption[] {
@@ -397,9 +436,16 @@ function serializePrompt(prompt: ContentBlock[]): string {
         parts.push("```\n" + res.text + "\n```" + uri);
       }
       // Binary resources cannot be inlined into a text prompt; skip them.
+    } else if (block.type === "image") {
+      const b = block as Record<string, unknown>;
+      const filePath = b.uri || (b._meta as Record<string, unknown> | undefined)?.filePath || b.path;
+      if (filePath && typeof filePath === "string") {
+        const cleanPath = filePath.startsWith("file://") ? decodeURIComponent(filePath.slice(7)) : filePath;
+        parts.push(`[Attached image: ${cleanPath}]`);
+      } else if (b.data) {
+        parts.push(`[Attached image (${b.mimeType || "image"})]`);
+      }
     }
-    // image/audio blocks are intentionally ignored: agy --print has no way to
-    // receive them (the protocol does not advertise image/audio support).
   }
   return parts.join("\n\n");
 }
@@ -411,7 +457,9 @@ function mapToolKind(toolName: string): ToolKind {
   if (t === "run_command" || t === "send_command_input" || t === "notebook_execution") return "execute";
   if (
     t === "write_to_file" ||
+    t === "write_file" ||
     t === "replace_file_content" ||
+    t === "edit_file" ||
     t === "multi_replace_file_content" ||
     t === "sed_file" ||
     t === "notebook_edit"
@@ -420,7 +468,9 @@ function mapToolKind(toolName: string): ToolKind {
   }
   if (
     t === "view_file" ||
+    t === "read_file" ||
     t === "list_dir" ||
+    t === "list_directory" ||
     t === "read_resource" ||
     t === "list_resources" ||
     t === "read_url_content" ||
@@ -428,7 +478,7 @@ function mapToolKind(toolName: string): ToolKind {
   ) {
     return "read";
   }
-  if (t === "grep_search" || t === "find_by_name" || t === "search_web") return "search";
+  if (t === "grep_search" || t === "find_by_name" || t === "search_web" || t === "search_file_content") return "search";
   if (
     t === "invoke_subagent" ||
     t === "define_subagent" ||
@@ -585,8 +635,8 @@ function handleAgyEvent(
       const location = extractLocation(parameters);
       let title = tool_name ? tool_name : "Running tool";
       if (tool_name === "call_mcp_tool") {
-        const mcpServer = parameters?.server_name || parameters?.server || parameters?.name;
-        const mcpTool = parameters?.tool_name || parameters?.tool;
+        const mcpServer = parameters?.ServerName || parameters?.server_name || parameters?.server || parameters?.name;
+        const mcpTool = parameters?.ToolName || parameters?.tool_name || parameters?.tool;
         if (mcpTool) {
           title = mcpServer ? `MCP [${mcpServer}]: ${mcpTool}` : `MCP: ${mcpTool}`;
         }
@@ -698,6 +748,9 @@ const app = agent({ name: "agy-acp" })
         },
       ],
     };
+  })
+  .onRequest("authenticate", async () => {
+    return {};
   })
   .onRequest("session/new", async (ctx) => {
     const { cwd, additionalDirectories, mcpServers } = ctx.params;
@@ -820,6 +873,10 @@ const app = agent({ name: "agy-acp" })
     } else if (configId === "effort") {
       const value = ctx.params.value as string;
       if (!EFFORTS.includes(value as Effort)) throw new Error(`Unknown effort ${value}`);
+      const model = findModel(session.modelBase);
+      if (model && !model.supportsEffort) {
+        throw new Error(`Model ${session.modelBase} does not support reasoning effort`);
+      }
       session.effort = value as Effort;
     }
     await sessions.set(session);
@@ -956,7 +1013,7 @@ const app = agent({ name: "agy-acp" })
           await sessions.set(latest);
         }
 
-        const wasKilled = child.killed || code === null;
+        const wasKilled = child.killed || code === null || code === 130 || code === 143;
         if (wasKilled) {
           resolve({ stopReason: "cancelled" });
         } else if (turnError) {
@@ -980,19 +1037,21 @@ const app = agent({ name: "agy-acp" })
   })
   .onNotification("session/cancel", async (ctx) => {
     const { sessionId } = ctx.params;
+    activeToolCallsBySession.delete(sessionId);
     closeNativeSession(sessionId, true);
     mcpConfigs.release(sessionId);
     const child = activeProcesses[sessionId];
     if (child) {
       logDebug("Cancelling active process for session", sessionId);
       child.kill("SIGINT");
-      setTimeout(() => {
+      const killTimer = setTimeout(() => {
         try {
           child.kill("SIGKILL");
         } catch {
           // already gone
         }
       }, 2000);
+      killTimer.unref();
     }
   });
 

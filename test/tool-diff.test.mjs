@@ -79,6 +79,51 @@ test("buildToolCallDiffs generates ACP diff for write_to_file creation and overw
   ]);
 });
 
+test("buildToolCallDiffs generates ACP diff for edit_file with Path, Target, Replacement", () => {
+  const diffs = buildToolCallDiffs("edit_file", {
+    Path: "/path/to/component.tsx",
+    Target: "<button>Click</button>",
+    Replacement: "<button>Submit</button>"
+  });
+  assert.deepEqual(diffs, [
+    {
+      type: "diff",
+      path: "/path/to/component.tsx",
+      oldText: "<button>Click</button>",
+      newText: "<button>Submit</button>"
+    }
+  ]);
+});
+
+test("buildToolCallDiffs generates ACP diff for write_file creation and overwrite", () => {
+  const created = buildToolCallDiffs("write_file", {
+    Path: "/path/to/index.ts",
+    Content: "export default 42;"
+  });
+  assert.deepEqual(created, [
+    {
+      type: "diff",
+      path: "/path/to/index.ts",
+      oldText: null,
+      newText: "export default 42;"
+    }
+  ]);
+
+  const overwritten = buildToolCallDiffs("write_file", {
+    Path: "/path/to/index.ts",
+    Content: "export default 100;",
+    Overwrite: true
+  });
+  assert.deepEqual(overwritten, [
+    {
+      type: "diff",
+      path: "/path/to/index.ts",
+      oldText: "",
+      newText: "export default 100;"
+    }
+  ]);
+});
+
 test("buildToolCallDiffs generates ACP diffs for multi_replace_file_content", () => {
   const diffs = buildToolCallDiffs("multi_replace_file_content", {
     TargetFile: "/path/to/file.ts",

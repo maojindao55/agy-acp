@@ -38,6 +38,7 @@ export class NativeSession {
     if (this.pending) return Promise.reject(new Error("This AGY session already has an active turn."));
     if (!this.alive) return Promise.reject(new Error("The AGY stream is closed."));
     if (this.idle) clearTimeout(this.idle);
+    this.stderr = "";
     return new Promise((resolve, reject) => {
       this.pending = { event, resolve, reject };
       this.child.stdin.write(JSON.stringify({ event: "user", message: { content: prompt } }) + "\n", error => {

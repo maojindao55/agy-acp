@@ -135,14 +135,14 @@ export function resolveToolCallParameters(
   stepIndex: number,
   parameters: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-  if (!["write_to_file", "replace_file_content", "multi_replace_file_content"].includes(toolName)) return parameters;
+  if (!["write_to_file", "write_file", "replace_file_content", "edit_file", "multi_replace_file_content"].includes(toolName)) return parameters;
   const p = parameters ?? {};
   const text = (value: unknown) => typeof value === "string" && !hasTruncatedArg(value);
   const replacements = p.Replacements ?? p.replacements;
-  const complete = toolName === "write_to_file"
-    ? text(p.CodeContent ?? p.codeContent ?? p.content)
-    : toolName === "replace_file_content"
-      ? text(p.TargetContent ?? p.targetContent) && text(p.ReplacementContent ?? p.replacementContent)
+  const complete = (toolName === "write_to_file" || toolName === "write_file")
+    ? text(p.Content ?? p.content ?? p.CodeContent ?? p.codeContent)
+    : (toolName === "replace_file_content" || toolName === "edit_file")
+      ? text(p.Target ?? p.target ?? p.TargetContent ?? p.targetContent) && text(p.Replacement ?? p.replacement ?? p.ReplacementContent ?? p.replacementContent)
       : Array.isArray(replacements) && replacements.length > 0 && replacements.every(rep =>
         rep && text(rep.TargetContent) && text(rep.ReplacementContent));
   const file = toolFilePath(p);
@@ -176,15 +176,15 @@ export function buildToolCallDiffs(
   const diffs: AcpToolDiff[] = [];
   const patch = outputText ? extractDiffBlock(outputText) : null;
   const useSnippets = !patch || !hasTruncatedArg([
-    p.TargetContent ?? p.targetContent,
-    p.ReplacementContent ?? p.replacementContent,
-    p.CodeContent ?? p.codeContent ?? p.content,
+    p.Target ?? p.target ?? p.TargetContent ?? p.targetContent,
+    p.Replacement ?? p.replacement ?? p.ReplacementContent ?? p.replacementContent,
+    p.Content ?? p.content ?? p.CodeContent ?? p.codeContent,
     p.Replacements ?? p.replacements,
   ]);
 
-  if (toolName === "replace_file_content") {
-    const targetContent = p.TargetContent ?? p.targetContent;
-    const replacementContent = p.ReplacementContent ?? p.replacementContent;
+  if (toolName === "replace_file_content" || toolName === "edit_file") {
+    const targetContent = p.Target ?? p.target ?? p.TargetContent ?? p.targetContent;
+    const replacementContent = p.Replacement ?? p.replacement ?? p.ReplacementContent ?? p.replacementContent;
     const hasTarget = typeof targetContent === "string";
     const hasReplacement = typeof replacementContent === "string";
 
@@ -197,9 +197,9 @@ export function buildToolCallDiffs(
         ...(hasReplacement && useSnippets ? { newText: replacementContent } : {}),
       });
     }
-  } else if (toolName === "write_to_file") {
+  } else if (toolName === "write_to_file" || toolName === "write_file") {
     const codeContent =
-      p.CodeContent ?? p.codeContent ?? (typeof p.content === "string" ? p.content : undefined);
+      p.Content ?? p.content ?? p.CodeContent ?? p.codeContent;
     const hasCode = typeof codeContent === "string";
     if (hasCode || patch) {
       const isOverwrite =

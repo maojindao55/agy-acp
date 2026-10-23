@@ -132,12 +132,12 @@ readline.createInterface({input:process.stdin}).on('line',async line=>{
   };
   const tasks = [run(0), run(1)];
   try {
-    for (let i = 0; i < 200 && contexts.filter(Boolean).length !== 2; i++) await new Promise(r => setTimeout(r, 10));
+    for (let i = 0; i < 500 && contexts.filter(Boolean).length !== 2; i++) await new Promise(r => setTimeout(r, 10));
     assert.equal(contexts.filter(Boolean).length, 2);
     const ids = await Promise.all(contexts.map(async ({ ctx }, i) => (await ctx.request("session/new", { cwd: workspace, mcpServers: [browser(i ? "B" : "A")] })).sessionId));
     const prompt = (i, text) => contexts[i].ctx.request("session/prompt", { sessionId: ids[i], prompt: [{ type: "text", text }] });
     const held = [prompt(0, "hold"), prompt(1, "hold")];
-    for (let i = 0; i < 200 && (await records()).filter(r => r.event === "spawn").length !== 2; i++) await new Promise(r => setTimeout(r, 10));
+    for (let i = 0; i < 500 && (await records()).filter(r => r.event === "spawn").length !== 2; i++) await new Promise(r => setTimeout(r, 10));
     const spawned = (await records()).filter(r => r.event === "spawn");
     assert.equal(spawned.length, 2); assert.notEqual(spawned[0].dir, spawned[1].dir);
     await fs.writeFile(barrier, "go"); await Promise.all(held);

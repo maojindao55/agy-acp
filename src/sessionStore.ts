@@ -24,7 +24,7 @@ export class SessionStore<T extends { sessionId: string }> {
       if (record.sessionId !== id || record.deleted) return;
       return this.migrate(record);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
     }
     const raw = (await this.legacy())[id];
     return raw ? this.migrate(raw) : undefined;
@@ -53,10 +53,15 @@ export class SessionStore<T extends { sessionId: string }> {
       throw error;
     }
     for (const file of files.filter(name => /^[a-f0-9]{64}\.json$/.test(name))) {
-      const record = JSON.parse(await fs.readFile(path.join(this.directory, file), "utf8"));
-      if (typeof record.sessionId !== "string" || path.basename(this.file(record.sessionId)) !== file) continue;
-      if (record.deleted) sessions.delete(record.sessionId);
-      else sessions.set(record.sessionId, this.migrate(record));
+      try {
+        const record = JSON.parse(await fs.readFile(path.join(this.directory, file), "utf8"));
+        if (typeof record.sessionId !== "string" || path.basename(this.file(record.sessionId)) !== file) continue;
+        if (record.deleted) sessions.delete(record.sessionId);
+        else sessions.set(record.sessionId, this.migrate(record));
+      } catch {
+        // Skip corrupted or unreadable session records rather than aborting session/list
+        continue;
+      }
     }
     return [...sessions.values()];
   }
