@@ -77,6 +77,7 @@ function spawnAgy(args: string[], options: any = {}): ChildProcessWithoutNullStr
   return spawn(command, commandArgs, {
     ...options,
     shell: options?.shell ?? isBatchScript,
+    windowsHide: isWindows,
   }) as ChildProcessWithoutNullStreams;
 }
 

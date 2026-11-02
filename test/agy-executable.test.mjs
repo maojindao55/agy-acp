@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -52,4 +53,9 @@ test("missing executables fall back to PATH-based spawning", () => {
     resolveAgyExecutable({ env: { PATH: "" }, platform: "linux", homedir: "" }),
     "agy",
   );
+});
+
+test("background AGY processes hide the Windows console window", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.match(source, /shell: options\?\.shell \?\? isBatchScript,\s*windowsHide: isWindows,/);
 });
