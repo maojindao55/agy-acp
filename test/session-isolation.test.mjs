@@ -47,6 +47,68 @@ test("MCP roots isolate credentials, remove stale host tools, preserve user conf
   assert.equal(await fs.readFile(path.join(data, "history"), "utf8"), "keep history");
 });
 
+test("stale Office host bindings are removed while current Office routes remain session-local", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "agy-office-config-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const config = path.join(home, ".gemini", "config", "mcp_config.json");
+  await fs.mkdir(path.dirname(config), { recursive: true });
+  const office = owner => ({
+    name: "office-engine", command: "node", args: ["officeEngineMcpServer.js"],
+    env: [
+      { name: "FREEBUDDY_OFFICE_MCP_URL", value: `http://127.0.0.1:${owner === "A" ? 39101 : 39102}/mcp` },
+      { name: "FREEBUDDY_OFFICE_TASK_SESSION", value: owner },
+      { name: "FREEBUDDY_OFFICE_FILE", value: `${owner}.docx` }
+    ]
+  });
+  const globalText = JSON.stringify({ customField: "keep", mcpServers: {
+    "office-engine": { command: "old-host", env: {
+      FREEBUDDY_OFFICE_MCP_URL: "http://127.0.0.1:39100/mcp",
+      FREEBUDDY_OFFICE_TASK_SESSION: "stale"
+    } },
+    userTool: { command: "user-tool", env: { USER_TOKEN: "keep" } }
+  } });
+  await fs.writeFile(config, globalText);
+  const roots = new SessionMcpConfigs(home); t.after(() => roots.dispose());
+  const [a, b, c] = await Promise.all([
+    roots.prepare("A", [office("A")]), roots.prepare("B", []), roots.prepare("C", [office("C")])
+  ]);
+  const read = async dir => JSON.parse(await fs.readFile(path.join(dir, "config", "mcp_config.json"), "utf8"));
+  const ac = await read(a), bc = await read(b), cc = await read(c);
+  assert.equal(ac.mcpServers["office-engine"].env.FREEBUDDY_OFFICE_MCP_URL, "http://127.0.0.1:39101/mcp");
+  assert.equal(ac.mcpServers["office-engine"].env.FREEBUDDY_OFFICE_TASK_SESSION, "A");
+  assert.equal(cc.mcpServers["office-engine"].env.FREEBUDDY_OFFICE_TASK_SESSION, "C");
+  assert.equal(bc.mcpServers["office-engine"], undefined);
+  for (const config of [ac, bc, cc]) {
+    assert.equal(config.mcpServers.userTool.command, "user-tool");
+    assert.equal(config.customField, "keep");
+  }
+  await roots.prepare("A", []);
+  assert.equal((await read(a)).mcpServers["office-engine"], undefined);
+  assert.equal((await read(c)).mcpServers["office-engine"].env.FREEBUDDY_OFFICE_TASK_SESSION, "C");
+  assert.equal(await fs.readFile(config, "utf8"), globalText);
+});
+
+test("an office-engine owned by the user is preserved without the host session markers", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "agy-user-office-config-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const config = path.join(home, ".gemini", "config", "mcp_config.json");
+  await fs.mkdir(path.dirname(config), { recursive: true });
+  const roots = new SessionMcpConfigs(home); t.after(() => roots.dispose());
+  for (const [i, env] of [
+    { OFFICE_URL: "http://localhost:40000/mcp" },
+    { FREEBUDDY_OFFICE_MCP_URL: "http://localhost:40000/mcp" },
+    { FREEBUDDY_OFFICE_TASK_SESSION: "user-session" }
+  ].entries()) {
+    const server = { command: "user-office", args: ["--custom"], env };
+    const globalText = JSON.stringify({ mcpServers: { "office-engine": server } });
+    await fs.writeFile(config, globalText);
+    const dir = await roots.prepare(`user-${i}`, []);
+    const effective = JSON.parse(await fs.readFile(path.join(dir, "config", "mcp_config.json"), "utf8"));
+    assert.deepEqual(effective.mcpServers["office-engine"], server);
+    assert.equal(await fs.readFile(config, "utf8"), globalText);
+  }
+});
+
 test("MCP import preserves JSONC strings and fails rather than silently dropping malformed user tools", async t => {
   const parsed = parseMcpConfig('\uFEFF{ /* header */ "mcpServers": { "api": { "url": "https://a/b//c", "args": ["comma,}", /* tail */], }, }, // end\n}');
   assert.equal(parsed.mcpServers.api.url, "https://a/b//c");

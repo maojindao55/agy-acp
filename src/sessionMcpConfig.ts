@@ -44,8 +44,16 @@ export function parseMcpConfig(text: string): Config {
 }
 
 function isHostBinding(name: string, server: any): boolean {
-  return name.startsWith("freebuddy-") && server?.env && typeof server.env === "object" &&
-    Object.keys(server.env).some(key => /^FREEBUDDY_.*(?:TOKEN|ENDPOINT|MANIFEST)$/.test(key));
+  const env = server?.env;
+  if (!env || typeof env !== "object" || Array.isArray(env)) return false;
+  // Office uses a reserved name without the freebuddy- prefix. Both markers
+  // identify a host session; a user-defined office-engine must still survive.
+  if (name === "office-engine") {
+    return typeof env.FREEBUDDY_OFFICE_MCP_URL === "string" &&
+      typeof env.FREEBUDDY_OFFICE_TASK_SESSION === "string";
+  }
+  return name.startsWith("freebuddy-") &&
+    Object.keys(env).some(key => /^FREEBUDDY_.*(?:TOKEN|ENDPOINT|MANIFEST)$/.test(key));
 }
 
 export function convertMcpServers(servers: McpServer[]): Record<string, any> {
